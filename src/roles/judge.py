@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QComboBox,
+    QFileDialog,
     QFormLayout,
     QHBoxLayout,
     QHeaderView,
@@ -29,13 +30,23 @@ from data.models import Counselor, Student
 from game import data_manager
 from game.rounds import INFO_KEYS, build_locate_questions, build_mixed_round, build_needle_round, format_student_answer
 from game.scorer import total_score
+from utils import theme
 
 
 class JudgeWindow(QMainWindow):
-    def __init__(self, activity_path: Path) -> None:
+    def __init__(
+        self,
+        activity_path: Path,
+        logout_callback: Optional[Callable[[], None]] = None,
+        theme_callback: Optional[Callable[[], None]] = None,
+    ) -> None:
         super().__init__()
         self.setWindowTitle(f"CogniStudent - 评委：{activity_path.name}")
+        self.logout_callback = logout_callback
+        self.theme_callback = theme_callback
         self.activity_path = activity_path
+        self.settings = data_manager.get_contest_settings(activity_path)
+        self.answer_fields = list(self.settings["answer_fields"])
         self.counselors = self.load_contest_counselors()
         self.current: Optional[Counselor] = None
         self.current_students: list[Student] = []
@@ -54,6 +65,12 @@ class JudgeWindow(QMainWindow):
         top.addWidget(title)
         top.addStretch(1)
         top.addWidget(self.timer_label)
+        theme_button = QPushButton(f"切换主题（当前：{theme.current_theme_label()}）")
+        theme_button.clicked.connect(lambda: self.switch_theme(theme_button))
+        top.addWidget(theme_button)
+        logout_button = QPushButton("退出到登录页")
+        logout_button.clicked.connect(self.logout)
+        top.addWidget(logout_button)
         root.addLayout(top)
 
         splitter = QSplitter()
@@ -79,6 +96,7 @@ class JudgeWindow(QMainWindow):
             ("暂停/继续", self.toggle_timer),
             ("保存当前成绩", self.save_current_score),
             ("导出成绩", self.export_scores),
+            ("导出评分数据", self.export_judge_results),
         ):
             button = QPushButton(text)
             button.clicked.connect(slot)
@@ -189,12 +207,16 @@ class JudgeWindow(QMainWindow):
         self.point_index = 0
         try:
             if round_name == "大海捞针":
-                round_data = build_needle_round(self.current_students)
-                per_point = 60.0 / max(1, len(round_data.students) * 11)
+                round_data = build_needle_round(
+                    self.current_students,
+                    count=int(self.settings["needle_student_count"]),
+                    duration_seconds=int(self.settings["needle_duration_seconds"]),
+                )
+                per_point = 60.0 / max(1, len(round_data.students) * len(self.answer_fields))
                 chunks = []
                 for student in round_data.students:
-                    chunks.append(format_student_answer(student))
-                    for key in ["姓名", *INFO_KEYS]:
+                    chunks.append(format_student_answer(student, self.answer_fields))
+                    for key in self.answer_fields:
                         self.round_points.append((f"{student.name} / {key}", per_point))
                 self.answer_text.setPlainText("\n\n".join(chunks))
                 self.start_timer(round_data.duration_seconds)
@@ -202,25 +224,31 @@ class JudgeWindow(QMainWindow):
                 contest = data_manager.get_contest_counselors(self.activity_path) or [c.id for c in self.counselors]
                 others = [cid for cid in contest if cid != self.current.id]
                 other_students = data_manager.load_all_students_for_judge(self.activity_path, others)
-                round_data = build_mixed_round(self.current_students, other_students)
-                per_point = 40.0 / max(1, 2 + len(round_data.own_students) * 11)
-                chunks = ["本人学生：", *[format_student_answer(s) for s in round_data.own_students]]
+                round_data = build_mixed_round(
+                    self.current_students,
+                    other_students,
+                    own_count=int(self.settings["mixed_own_count"]),
+                    distractor_count=int(self.settings["mixed_distractor_count"]),
+                    duration_seconds=int(self.settings["mixed_duration_seconds"]),
+                )
+                per_point = 40.0 / max(1, 2 + len(round_data.own_students) * len(self.answer_fields))
+                chunks = ["本人学生：", *[format_student_answer(s, self.answer_fields) for s in round_data.own_students]]
                 chunks.append("抽取照片学号：" + "、".join(s.student_id for s in round_data.all_students))
                 self.round_points.extend([("选中本人学生1", per_point), ("选中本人学生2", per_point)])
                 for student in round_data.own_students:
-                    for key in ["姓名", *INFO_KEYS]:
+                    for key in self.answer_fields:
                         self.round_points.append((f"{student.name} / {key}", per_point))
                 self.answer_text.setPlainText("\n\n".join(chunks))
                 self.start_timer(round_data.duration_seconds)
             else:
-                questions = build_locate_questions(self.current_students)
+                questions = build_locate_questions(self.current_students, count=int(self.settings["locate_question_count"]))
                 chunks = []
                 for index, question in enumerate(questions, start=1):
                     clues = "\n".join(f"{key}：{value or '未填写'}" for key, value in question.clues.items())
                     chunks.append(f"题 {index}\n{clues}\n答案：{question.answer.name}")
                     self.round_points.append((f"描述定位 {index}：{question.answer.name}", 10.0))
                 self.answer_text.setPlainText("\n\n".join(chunks))
-                self.start_timer(120)
+                self.start_timer(int(self.settings["locate_duration_seconds"]))
         except Exception as exc:
             QMessageBox.warning(self, "启动失败", str(exc))
             return
@@ -288,3 +316,16 @@ class JudgeWindow(QMainWindow):
             QMessageBox.warning(self, "导出失败", str(exc))
             return
         QMessageBox.information(self, "导出成功", f"成绩已导出到：{output}")
+
+    def export_judge_results(self) -> None:
+        QMessageBox.information(self, "功能已调整", "当前版本使用单机双屏比赛流程，不再导出评委评分数据包。")
+
+    def logout(self) -> None:
+        self.timer.stop()
+        if self.logout_callback:
+            self.logout_callback()
+
+    def switch_theme(self, button: QPushButton) -> None:
+        if self.theme_callback:
+            self.theme_callback()
+        button.setText(f"切换主题（当前：{theme.current_theme_label()}）")

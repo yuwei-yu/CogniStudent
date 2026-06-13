@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from functools import partial
 from pathlib import Path
+from typing import Callable, Optional
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
+    QFileDialog,
     QFormLayout,
     QGridLayout,
     QGroupBox,
@@ -29,6 +31,7 @@ from data.models import Counselor, Student
 from game import data_manager
 from game.rounds import INFO_KEYS, build_locate_questions, build_mixed_round, build_needle_round, format_student_answer
 from game.scorer import score_locate, score_student_fields, total_score
+from utils import theme
 
 
 class PhotoLabel(QLabel):
@@ -60,11 +63,21 @@ class PhotoLabel(QLabel):
 
 
 class CounselorWindow(QMainWindow):
-    def __init__(self, activity_path: Path, counselor: Counselor) -> None:
+    def __init__(
+        self,
+        activity_path: Path,
+        counselor: Counselor,
+        logout_callback: Optional[Callable[[], None]] = None,
+        theme_callback: Optional[Callable[[], None]] = None,
+    ) -> None:
         super().__init__()
         self.setWindowTitle(f"CogniStudent - 辅导员：{counselor.name}")
+        self.logout_callback = logout_callback
+        self.theme_callback = theme_callback
         self.activity_path = activity_path
         self.counselor = counselor
+        self.settings = data_manager.get_contest_settings(activity_path)
+        self.answer_fields = list(self.settings["answer_fields"])
         self.students = data_manager.load_students(counselor.excel_path, counselor.photos_dir)
         self.scores: dict[str, float] = {}
         self.timer = QTimer(self)
@@ -84,6 +97,12 @@ class CounselorWindow(QMainWindow):
         top.addStretch(1)
         top.addWidget(self.training)
         top.addWidget(self.timer_label)
+        theme_button = QPushButton(f"切换主题（当前：{theme.current_theme_label()}）")
+        theme_button.clicked.connect(lambda: self.switch_theme(theme_button))
+        top.addWidget(theme_button)
+        logout_button = QPushButton("退出到登录页")
+        logout_button.clicked.connect(self.logout)
+        top.addWidget(logout_button)
         layout.addLayout(top)
 
         self.tabs = QTabWidget()
@@ -139,7 +158,7 @@ class CounselorWindow(QMainWindow):
             group = QGroupBox(student.student_id)
             form = QFormLayout(group)
             fields: dict[str, QLineEdit] = {}
-            for key in ["姓名", *INFO_KEYS]:
+            for key in self.answer_fields:
                 edit = QLineEdit()
                 fields[key] = edit
                 form.addRow(key, edit)
@@ -169,7 +188,11 @@ class CounselorWindow(QMainWindow):
             if len(self.students) < 1:
                 QMessageBox.warning(self, "学生不足", "当前辅导员没有可抽取学生。")
                 return
-            self.needle_round = build_needle_round(self.students)
+            self.needle_round = build_needle_round(
+                self.students,
+                count=int(self.settings["needle_student_count"]),
+                duration_seconds=int(self.settings["needle_duration_seconds"]),
+            )
             content = QWidget()
             content_layout = QVBoxLayout(content)
             photos, _ = self.build_photo_grid(self.needle_round.students)
@@ -187,11 +210,11 @@ class CounselorWindow(QMainWindow):
             each_max = self.needle_round.max_score / max(1, len(self.needle_round.students))
             for student in self.needle_round.students:
                 answers = {key: edit.text() for key, edit in self.needle_inputs[student.student_id].items()}
-                item_score, result = score_student_fields(student, answers, each_max)
+                item_score, result = score_student_fields(student, answers, each_max, self.answer_fields)
                 score += item_score
                 details.append(f"{student.name}：{item_score:.2f} 分")
                 if self.training.isChecked():
-                    details.append(format_student_answer(student))
+                    details.append(format_student_answer(student, self.answer_fields))
             self.scores["大海捞针"] = round(score, 2)
             self.update_scores()
             QMessageBox.information(self, "大海捞针得分", "\n\n".join(details) + f"\n\n合计：{score:.2f}")
@@ -230,7 +253,13 @@ class CounselorWindow(QMainWindow):
             if len(self.students) < 2 or len(others) < 1:
                 QMessageBox.warning(self, "学生不足", "需要至少2名本人学生和其他辅导员学生作为干扰项。")
                 return
-            self.mixed_round = build_mixed_round(self.students, others)
+            self.mixed_round = build_mixed_round(
+                self.students,
+                others,
+                own_count=int(self.settings["mixed_own_count"]),
+                distractor_count=int(self.settings["mixed_distractor_count"]),
+                duration_seconds=int(self.settings["mixed_duration_seconds"]),
+            )
             content = QWidget()
             content_layout = QVBoxLayout(content)
             photos, self.mixed_labels = self.build_photo_grid(self.mixed_round.all_students, selectable=True)
@@ -261,11 +290,11 @@ class CounselorWindow(QMainWindow):
             each_max = 32.0 / max(1, len(self.mixed_round.own_students))
             for student in self.mixed_round.own_students:
                 answers = {key: edit.text() for key, edit in self.mixed_inputs.get(student.student_id, {}).items()}
-                item_score, _ = score_student_fields(student, answers, each_max)
+                item_score, _ = score_student_fields(student, answers, each_max, self.answer_fields)
                 score += item_score
                 details.append(f"{student.name}：{item_score:.2f} 分")
                 if self.training.isChecked():
-                    details.append(format_student_answer(student))
+                    details.append(format_student_answer(student, self.answer_fields))
             self.scores["鱼目混珠"] = round(score, 2)
             self.update_scores()
             QMessageBox.information(self, "鱼目混珠得分", "\n\n".join(details) + f"\n\n合计：{score:.2f}")
@@ -297,7 +326,7 @@ class CounselorWindow(QMainWindow):
                 child = self.locate_layout.takeAt(0)
                 if child.widget():
                     child.widget().deleteLater()
-            self.locate_questions = build_locate_questions(self.students)
+            self.locate_questions = build_locate_questions(self.students, count=int(self.settings["locate_question_count"]))
             self.locate_inputs = []
             for index, question in enumerate(self.locate_questions, start=1):
                 group = QGroupBox(f"描述定位 {index}")
@@ -332,8 +361,11 @@ class CounselorWindow(QMainWindow):
         self.score_text.setReadOnly(True)
         save = QPushButton("保存本地成绩")
         save.clicked.connect(self.save_score)
+        export = QPushButton("导出答题结果")
+        export.clicked.connect(self.export_result)
         layout.addWidget(self.score_text)
         layout.addWidget(save)
+        layout.addWidget(export)
         self.tabs.addTab(tab, "成绩")
         self.update_scores()
 
@@ -348,3 +380,15 @@ class CounselorWindow(QMainWindow):
         data_manager.save_score(self.activity_path, self.counselor.id, self.scores)
         QMessageBox.information(self, "已保存", "成绩已保存到当前活动的 scores.json。")
 
+    def export_result(self) -> None:
+        QMessageBox.information(self, "功能已调整", "当前版本使用单机双屏比赛流程，不再导出辅导员答题结果包。")
+
+    def logout(self) -> None:
+        self.timer.stop()
+        if self.logout_callback:
+            self.logout_callback()
+
+    def switch_theme(self, button: QPushButton) -> None:
+        if self.theme_callback:
+            self.theme_callback()
+        button.setText(f"切换主题（当前：{theme.current_theme_label()}）")

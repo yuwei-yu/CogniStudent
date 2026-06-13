@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass
+from typing import Optional
 
 from data.models import Student
 
@@ -47,19 +48,25 @@ class LocateQuestion:
     clues: dict[str, str]
 
 
-def build_needle_round(students: list[Student]) -> NeedleRound:
-    selected = random.sample(students, min(3, len(students)))
-    return NeedleRound(students=selected)
+def build_needle_round(students: list[Student], count: int = 3, duration_seconds: int = 180) -> NeedleRound:
+    selected = random.sample(students, min(count, len(students)))
+    return NeedleRound(students=selected, duration_seconds=duration_seconds)
 
 
-def build_mixed_round(own_students: list[Student], other_students: list[Student]) -> MixedRound:
-    own = random.sample(own_students, min(2, len(own_students)))
-    distractors = random.sample(other_students, min(8, len(other_students)))
-    return MixedRound(own_students=own, distractors=distractors)
+def build_mixed_round(
+    own_students: list[Student],
+    other_students: list[Student],
+    own_count: int = 2,
+    distractor_count: int = 8,
+    duration_seconds: int = 120,
+) -> MixedRound:
+    own = random.sample(own_students, min(own_count, len(own_students)))
+    distractors = random.sample(other_students, min(distractor_count, len(other_students)))
+    return MixedRound(own_students=own, distractors=distractors, duration_seconds=duration_seconds)
 
 
-def build_locate_questions(students: list[Student]) -> list[LocateQuestion]:
-    selected = random.sample(students, min(2, len(students)))
+def build_locate_questions(students: list[Student], count: int = 2) -> list[LocateQuestion]:
+    selected = random.sample(students, min(count, len(students)))
     questions: list[LocateQuestion] = []
     for student in selected:
         fields = {
@@ -74,5 +81,7 @@ def build_locate_questions(students: list[Student]) -> list[LocateQuestion]:
     return questions
 
 
-def format_student_answer(student: Student) -> str:
-    return "\n".join(f"{key}：{value or '未填写'}" for key, value in student.answer_fields().items())
+def format_student_answer(student: Student, answer_fields: Optional[list[str]] = None) -> str:
+    values = student.answer_fields()
+    fields = answer_fields or list(values.keys())
+    return "\n".join(f"{key}：{values.get(key, '') or '未填写'}" for key in fields)

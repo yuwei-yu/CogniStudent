@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -19,18 +19,23 @@ from PySide6.QtWidgets import (
 )
 
 from game import data_manager
+from utils import theme
 
 
 class RoleDialog(QDialog):
-    def __init__(self, parent: Optional[QWidget] = None) -> None:
+    def __init__(self, parent: Optional[QWidget] = None, theme_callback: Optional[Callable[[], None]] = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("选择角色")
         self.selected_role: Optional[str] = None
+        self.theme_callback = theme_callback
         layout = QVBoxLayout(self)
         title = QLabel("辅导员辨识学生系统")
         title.setAlignment(Qt.AlignCenter)
         title.setObjectName("titleLabel")
         layout.addWidget(title)
+        theme_button = QPushButton(f"切换主题（当前：{theme.current_theme_label()}）")
+        theme_button.clicked.connect(lambda: self.switch_theme(theme_button))
+        layout.addWidget(theme_button)
         row = QHBoxLayout()
         for text, role in (("管理员", "admin"), ("辅导员", "counselor"), ("评委", "judge")):
             button = QPushButton(text)
@@ -39,6 +44,11 @@ class RoleDialog(QDialog):
             row.addWidget(button)
         layout.addLayout(row)
         self.resize(420, 160)
+
+    def switch_theme(self, button: QPushButton) -> None:
+        if self.theme_callback:
+            self.theme_callback()
+        button.setText(f"切换主题（当前：{theme.current_theme_label()}）")
 
     def choose(self, role: str) -> None:
         self.selected_role = role
@@ -71,15 +81,19 @@ class ActivityDialog(QDialog):
 
 
 class AdminLoginDialog(QDialog):
-    def __init__(self, parent: Optional[QWidget] = None) -> None:
+    def __init__(self, parent: Optional[QWidget] = None, theme_callback: Optional[Callable[[], None]] = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("管理员登录")
+        self.theme_callback = theme_callback
         layout = QFormLayout(self)
         self.username = QLineEdit("admin")
         self.password = QLineEdit()
         self.password.setEchoMode(QLineEdit.Password)
         layout.addRow("账号", self.username)
         layout.addRow("密码", self.password)
+        theme_button = QPushButton(f"切换主题（当前：{theme.current_theme_label()}）")
+        theme_button.clicked.connect(lambda: self.switch_theme(theme_button))
+        layout.addWidget(theme_button)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.try_login)
         buttons.rejected.connect(self.reject)
@@ -90,6 +104,11 @@ class AdminLoginDialog(QDialog):
             self.accept()
         else:
             QMessageBox.warning(self, "登录失败", "管理员账号或密码错误。")
+
+    def switch_theme(self, button: QPushButton) -> None:
+        if self.theme_callback:
+            self.theme_callback()
+        button.setText(f"切换主题（当前：{theme.current_theme_label()}）")
 
 
 class CounselorLoginDialog(QDialog):
@@ -134,7 +153,4 @@ class JudgeLoginDialog(QDialog):
         layout.addWidget(buttons)
 
     def try_login(self) -> None:
-        if data_manager.authenticate_judge(self.username.text(), self.password.text()):
-            self.accept()
-        else:
-            QMessageBox.warning(self, "登录失败", "评委账号或密码错误。")
+        QMessageBox.information(self, "功能已调整", "当前版本使用管理员登录后启动单机双屏比赛，不再提供评委登录。")

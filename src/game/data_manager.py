@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 import shutil
 import zipfile
-from pathlib import Path
+from datetime import datetime
+from pathlib import Path, PurePosixPath
 from typing import Iterable, Optional
 
 import pandas as pd
@@ -13,13 +14,35 @@ from utils.helpers import app_root, bundled_root, copy_file, ensure_dir, read_js
 
 
 ADMIN_CONFIG = "admin_config.json"
-JUDGE_CONFIG = "judge_config.json"
 CONTEST_CONFIG = "contest_config.json"
+CONTEST_SETTINGS = "contest_settings.json"
 SCORES_FILE = "scores.json"
 CURRENT_ACTIVITY_FILE = ".current_activity.json"
 
 DEFAULT_ADMIN = {"username": "admin", "password": "admin123"}
-DEFAULT_JUDGE = {"username": "judge", "password": "123"}
+
+DEFAULT_CONTEST_SETTINGS = {
+    "needle_duration_seconds": 180,
+    "mixed_duration_seconds": 120,
+    "locate_duration_seconds": 120,
+    "needle_student_count": 3,
+    "mixed_own_count": 2,
+    "mixed_distractor_count": 8,
+    "locate_question_count": 2,
+    "answer_fields": [
+        "姓名",
+        "专业",
+        "政治面貌",
+        "担任职务",
+        "家庭住址",
+        "宿舍",
+        "家庭经济状况",
+        "心理健康状况",
+        "英语四六级",
+        "不及格科目",
+        "奖惩情况",
+    ],
+}
 
 REQUIRED_COLUMNS = [
     "学号",
@@ -57,7 +80,8 @@ CURRENT_ACTIVITY: Optional[str] = None
 def bootstrap() -> None:
     root = ensure_dir(resources_root())
     ensure_default_config(root / ADMIN_CONFIG, DEFAULT_ADMIN)
-    ensure_default_config(root / JUDGE_CONFIG, DEFAULT_JUDGE)
+    if not global_contest_settings_path().exists():
+        save_contest_settings(DEFAULT_CONTEST_SETTINGS)
 
 
 def ensure_default_config(path: Path, default: dict[str, str]) -> None:
@@ -140,11 +164,6 @@ def authenticate_admin(username: str, password: str) -> bool:
     return username == cfg.get("username") and password == cfg.get("password")
 
 
-def authenticate_judge(username: str, password: str) -> bool:
-    cfg = read_json(resources_root() / JUDGE_CONFIG, DEFAULT_JUDGE)
-    return username == cfg.get("username") and password == cfg.get("password")
-
-
 def authenticate_counselor(activity_path: Path, name: str, pwd: str) -> Optional[Counselor]:
     for counselor in get_counselors(activity_path):
         if counselor.name == name.strip() and counselor.employee_id == pwd.strip():
@@ -156,6 +175,16 @@ def read_excel(excel_path: Path) -> pd.DataFrame:
     if excel_path.suffix.lower() == ".xls":
         return pd.read_excel(excel_path, engine="xlrd", dtype=str).fillna("")
     return pd.read_excel(excel_path, engine="openpyxl", dtype=str).fillna("")
+
+
+def clean_cell(value: object) -> str:
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    text = str(value).strip()
+    return "" if text.lower() in {"nan", "nat", "none"} else text
 
 
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -188,28 +217,29 @@ def load_students(excel_path: Path, photos_dir: Path) -> list[Student]:
     students: list[Student] = []
     counselor_id = excel_path.stem
     for _, row in df.iterrows():
-        student_id = str(row.get("学号", "")).strip()
-        name = str(row.get("姓名", "")).strip()
-        if not student_id and not name:
+        extra = {str(k): clean_cell(v) for k, v in row.items()}
+        if not any(extra.values()):
             continue
+        student_id = clean_cell(row.get("学号", ""))
+        name = clean_cell(row.get("姓名", ""))
         photo_path = find_photo(photos_dir, student_id)
         students.append(
             Student(
                 student_id=student_id,
                 name=name,
-                major=str(row.get("专业", "")).strip(),
-                political_status=str(row.get("政治面貌", "")).strip(),
-                position=str(row.get("担任职务", "")).strip(),
-                hometown=str(row.get("家庭住址", "")).strip(),
-                dormitory=str(row.get("宿舍", "")).strip(),
-                financial_status=str(row.get("家庭经济状况", "")).strip(),
-                mental_health=str(row.get("心理健康状况", "")).strip(),
-                cet_status=str(row.get("英语四六级", "")).strip(),
-                failed_courses=str(row.get("不及格科目", "")).strip(),
-                awards=str(row.get("奖惩情况", "")).strip(),
+                major=clean_cell(row.get("专业", "")),
+                political_status=clean_cell(row.get("政治面貌", "")),
+                position=clean_cell(row.get("担任职务", "")),
+                hometown=clean_cell(row.get("家庭住址", "")),
+                dormitory=clean_cell(row.get("宿舍", "")),
+                financial_status=clean_cell(row.get("家庭经济状况", "")),
+                mental_health=clean_cell(row.get("心理健康状况", "")),
+                cet_status=clean_cell(row.get("英语四六级", "")),
+                failed_courses=clean_cell(row.get("不及格科目", "")),
+                awards=clean_cell(row.get("奖惩情况", "")),
                 photo_path=photo_path,
                 counselor_id=counselor_id,
-                extra={str(k): str(v).strip() for k, v in row.items()},
+                extra=extra,
             )
         )
     return students
@@ -246,21 +276,46 @@ def validate_counselor_pair(activity_path: Path, base_name: str) -> tuple[bool, 
     return not errors, errors, warnings
 
 
+def decode_zip_member_name(info: zipfile.ZipInfo) -> str:
+    if info.flag_bits & 0x800:
+        return info.filename
+    try:
+        raw_name = info.filename.encode("cp437")
+    except UnicodeEncodeError:
+        return info.filename
+    for encoding in ("gbk", "cp936", "utf-8"):
+        try:
+            decoded = raw_name.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+        if decoded:
+            return decoded
+    return info.filename
+
+
+def normalize_zip_member_name(member: str) -> str:
+    return member.replace("\\", "/")
+
+
 def is_safe_zip_member(member: str) -> bool:
-    path = Path(member)
+    normalized = normalize_zip_member_name(member)
+    path = PurePosixPath(normalized)
     if path.is_absolute():
         return False
-    return ".." not in path.parts
+    if "\x00" in normalized:
+        return False
+    return ".." not in path.parts and not any(":" in part for part in path.parts)
 
 
 def upload_zip(zip_path: Path, activity_path: Path, overwrite: bool = False) -> dict[str, list[str]]:
     ensure_dir(activity_path)
     report = {"imported": [], "skipped": [], "warnings": [], "errors": []}
     with zipfile.ZipFile(zip_path) as zf:
-        unsafe = [info.filename for info in zf.infolist() if not is_safe_zip_member(info.filename)]
+        members = [(info, normalize_zip_member_name(decode_zip_member_name(info))) for info in zf.infolist()]
+        unsafe = [name for _, name in members if not is_safe_zip_member(name)]
         if unsafe:
             raise ValueError(f"压缩包包含不安全路径：{unsafe[0]}")
-        names = [Path(info.filename) for info in zf.infolist() if not info.is_dir()]
+        names = [PurePosixPath(name) for info, name in members if not info.is_dir()]
         root_parts = [p.parts[0] for p in names if len(p.parts) >= 2]
         strip_root = len(set(root_parts)) == 1 and not any(len(p.parts) == 1 for p in names)
         tmp = activity_path / ".upload_tmp"
@@ -268,12 +323,13 @@ def upload_zip(zip_path: Path, activity_path: Path, overwrite: bool = False) -> 
             shutil.rmtree(tmp)
         tmp.mkdir()
         try:
-            for info in zf.infolist():
+            for info, decoded_name in members:
                 if info.is_dir():
                     continue
-                rel = Path(info.filename)
-                if strip_root and len(rel.parts) > 1:
-                    rel = Path(*rel.parts[1:])
+                rel_posix = PurePosixPath(decoded_name)
+                if strip_root and len(rel_posix.parts) > 1:
+                    rel_posix = PurePosixPath(*rel_posix.parts[1:])
+                rel = Path(*rel_posix.parts)
                 target = tmp / rel
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with zf.open(info) as src, target.open("wb") as dst:
@@ -297,15 +353,66 @@ def upload_zip(zip_path: Path, activity_path: Path, overwrite: bool = False) -> 
                         shutil.rmtree(activity_path / base)
                 shutil.move(str(excel), str(activity_path / excel.name))
                 shutil.move(str(folder), str(activity_path / base))
+                report["imported"].append(base)
                 ok, errors, warnings = validate_counselor_pair(activity_path, base)
                 report["warnings"].extend(warnings)
-                if ok:
-                    report["imported"].append(base)
-                else:
+                if not ok:
                     report["errors"].extend(errors)
         finally:
             if tmp.exists():
                 shutil.rmtree(tmp)
+    return report
+
+
+def write_zip_file_utf8(zf: zipfile.ZipFile, source: Path, arcname: str) -> None:
+    info = zipfile.ZipInfo(arcname.replace("\\", "/"))
+    info.date_time = datetime.fromtimestamp(source.stat().st_mtime).timetuple()[:6]
+    info.compress_type = zipfile.ZIP_DEFLATED
+    info.flag_bits |= 0x800
+    with source.open("rb") as src:
+        zf.writestr(info, src.read())
+
+
+def export_all_data_package(destination: Path) -> Path:
+    root = resources_root()
+    ensure_dir(destination.parent)
+    with zipfile.ZipFile(destination, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for path in sorted(root.rglob("*")):
+            if path.is_file():
+                arcname = f"resources/{path.relative_to(root).as_posix()}"
+                write_zip_file_utf8(zf, path, arcname)
+    return destination
+
+
+def import_data_package(zip_path: Path, overwrite: bool = True) -> dict[str, list[str]]:
+    root = resources_root()
+    ensure_dir(root)
+    report = {"imported": [], "skipped": [], "warnings": [], "errors": []}
+    with zipfile.ZipFile(zip_path) as zf:
+        members = [(info, normalize_zip_member_name(decode_zip_member_name(info))) for info in zf.infolist()]
+        unsafe = [name for _, name in members if not is_safe_zip_member(name)]
+        if unsafe:
+            raise ValueError(f"压缩包包含不安全路径：{unsafe[0]}")
+        for info, name in members:
+            if info.is_dir():
+                continue
+            parts = PurePosixPath(name).parts
+            if not parts:
+                continue
+            if parts[0] == "resources":
+                rel_parts = parts[1:]
+            else:
+                rel_parts = parts
+            if not rel_parts:
+                continue
+            target = root.joinpath(*rel_parts)
+            if target.exists() and not overwrite:
+                report["skipped"].append(str(target.relative_to(root)))
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with zf.open(info) as src, target.open("wb") as dst:
+                shutil.copyfileobj(src, dst)
+            report["imported"].append(str(target.relative_to(root)))
     return report
 
 
@@ -333,6 +440,29 @@ def get_contest_counselors(activity_path: Path) -> list[str]:
 
 def save_contest_counselors(activity_path: Path, counselor_ids: list[str]) -> None:
     write_json(contest_config_path(activity_path), {"counselors": counselor_ids})
+
+
+def global_contest_settings_path() -> Path:
+    return resources_root() / CONTEST_SETTINGS
+
+
+def get_contest_settings(activity_path: Optional[Path] = None) -> dict:
+    settings = DEFAULT_CONTEST_SETTINGS.copy()
+    data = read_json(global_contest_settings_path(), {})
+    if isinstance(data, dict):
+        settings.update(data)
+    fields = settings.get("answer_fields")
+    if not isinstance(fields, list) or not fields:
+        settings["answer_fields"] = DEFAULT_CONTEST_SETTINGS["answer_fields"]
+    elif "姓名" not in fields:
+        settings["answer_fields"] = ["姓名", *fields]
+    return settings
+
+
+def save_contest_settings(settings: dict, activity_path: Optional[Path] = None) -> None:
+    merged = DEFAULT_CONTEST_SETTINGS.copy()
+    merged.update(settings)
+    write_json(global_contest_settings_path(), merged)
 
 
 def scores_path(activity_path: Path) -> Path:

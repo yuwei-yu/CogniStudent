@@ -1,0 +1,22 @@
+{
+  "needle_duration_seconds": 180,
+  "mixed_duration_seconds": 120,
+  "locate_duration_seconds": 120,
+  "needle_student_count": 3,
+  "mixed_own_count": 2,
+  "mixed_distractor_count": 8,
+  "locate_question_count": 2,
+  "answer_fields": [
+    "姓名",
+    "专业",
+    "政治面貌",
+    "担任职务",
+    "家庭住址",
+    "宿舍",
+    "家庭经济状况",
+    "心理健康状况",
+    "英语四六级",
+    "不及格科目",
+    "奖惩情况"
+  ]
+}
