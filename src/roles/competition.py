@@ -33,54 +33,32 @@ class DisplayWindow(QMainWindow):
     def __init__(self, title: str) -> None:
         super().__init__()
         self.setWindowTitle(title)
+        self.title_label = QLabel(title)
+        self.title_label.setObjectName("titleLabel")
         self.browser = QTextBrowser()
         self.browser.setOpenExternalLinks(False)
-        self.setCentralWidget(self.browser)
+        self._last_body = ""
+        self._last_zoom = 0
+        self._last_image_width = 0
+        central = QWidget()
+        layout = QVBoxLayout(central)
+        layout.addWidget(self.title_label)
+        layout.addWidget(self.browser)
+        self.setCentralWidget(central)
         self.resize(960, 640)
 
     def set_content(self, title: str, body: str, zoom: int) -> None:
-        font_size = max(14, int(18 * zoom / 100))
         image_width = max(120, int(180 * zoom / 100))
-        html = f"""
-        <html>
-        <head>
-        <style>
-        body {{
-            font-family: 'Microsoft YaHei', 'PingFang SC', sans-serif;
-            font-size: {font_size}px;
-            line-height: 1.55;
-            margin: 22px;
-        }}
-        h1 {{
-            font-size: {font_size + 8}px;
-            margin-bottom: 14px;
-        }}
-        .grid {{
-            display: flex;
-            flex-wrap: wrap;
-            gap: 16px;
-        }}
-        .card {{
-            border: 1px solid #90a4ae;
-            border-radius: 6px;
-            padding: 10px;
-            margin: 8px;
-            display: inline-block;
-            vertical-align: top;
-        }}
-        img {{
-            max-width: {image_width}px;
-            max-height: {image_width}px;
-        }}
-        .muted {{
-            color: #607d8b;
-        }}
-        </style>
-        </head>
-        <body><h1>{escape(title)}</h1>{body}</body>
-        </html>
-        """
-        self.browser.setHtml(html)
+        self.title_label.setText(title)
+        if body == self._last_body and zoom == self._last_zoom and image_width == self._last_image_width:
+            return
+        self._last_body = body
+        self._last_zoom = zoom
+        self._last_image_width = image_width
+        self.browser.setHtml(build_html_document(body, zoom, image_width))
+
+    def set_title(self, title: str) -> None:
+        self.title_label.setText(title)
 
     def move_to_screen(self, index: int) -> None:
         screens = QGuiApplication.screens()
@@ -108,6 +86,8 @@ class CompetitionControlWindow(QMainWindow):
         self.current_round = "大海捞针"
         self.question_html = "<p>尚未开始。</p>"
         self.judge_html = "<p>尚未开始。</p>"
+        self.round_ready = False
+        self.question_revealed = False
         self.remaining_seconds: Optional[int] = None
         self.timer = QTimer(self)
         self.timer.setInterval(1000)
@@ -141,6 +121,7 @@ class CompetitionControlWindow(QMainWindow):
         round_row = QHBoxLayout()
         self.round_combo = QComboBox()
         self.round_combo.addItems(["大海捞针", "鱼目混珠", "描述定位"])
+        self.round_combo.setMinimumWidth(120)
         self.round_combo.currentTextChanged.connect(self.set_round)
         draw_button = QPushButton("生成/重抽题目")
         draw_button.clicked.connect(self.draw_round)
@@ -165,6 +146,10 @@ class CompetitionControlWindow(QMainWindow):
         self.judge_content = QComboBox()
         self.question_content.addItems(["题目", "标准信息"])
         self.judge_content.addItems(["标准信息", "题目"])
+        for combo in (self.question_screen, self.judge_screen):
+            combo.setMinimumWidth(150)
+        for combo in (self.question_content, self.judge_content):
+            combo.setMinimumWidth(90)
         for combo in (self.question_screen, self.judge_screen):
             for index, screen in enumerate(QGuiApplication.screens()):
                 combo.addItem(f"屏幕 {index + 1}: {screen.name()}", index)
@@ -246,6 +231,8 @@ class CompetitionControlWindow(QMainWindow):
     def reset_round(self) -> None:
         self.timer.stop()
         self.remaining_seconds = None
+        self.round_ready = False
+        self.question_revealed = False
         self.timer_button.setText("开始计时")
         self.timer_label.setText("计时：未开始")
         self.question_html = "<p>请生成题目。</p>"
@@ -263,11 +250,15 @@ class CompetitionControlWindow(QMainWindow):
     def reset_timer(self) -> None:
         self.timer.stop()
         self.remaining_seconds = self.round_duration()
+        self.question_revealed = False
         self.timer_button.setText("开始计时")
         self.update_timer_label()
         self.update_displays()
 
     def toggle_timer(self) -> None:
+        if not self.round_ready:
+            QMessageBox.warning(self, "未生成题目", "请先点击“生成/重抽题目”。")
+            return
         if self.remaining_seconds is None:
             self.reset_timer()
         if self.remaining_seconds is not None and self.remaining_seconds <= 0:
@@ -276,9 +267,12 @@ class CompetitionControlWindow(QMainWindow):
             self.timer.stop()
             self.timer_button.setText("继续计时")
         else:
+            self.question_revealed = True
             self.timer.start()
             self.timer_button.setText("暂停计时")
+            self.show_displays()
         self.update_timer_label()
+        self.update_displays()
 
     def on_timer_tick(self) -> None:
         if self.remaining_seconds is None:
@@ -288,7 +282,7 @@ class CompetitionControlWindow(QMainWindow):
             self.timer.stop()
             self.timer_button.setText("开始计时")
         self.update_timer_label()
-        self.update_displays()
+        self.update_display_titles()
 
     def update_timer_label(self) -> None:
         self.timer_label.setText(f"计时：{self.timer_text()}")
@@ -341,6 +335,8 @@ class CompetitionControlWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.warning(self, "抽题失败", str(exc))
             return
+        self.round_ready = True
+        self.question_revealed = False
         self.reset_timer()
         self.update_displays()
         self.show_displays()
@@ -369,21 +365,31 @@ class CompetitionControlWindow(QMainWindow):
     def render_clues(self, clues: dict[str, str]) -> str:
         return "<ul>" + "".join(f"<li><b>{escape(key)}：</b>{escape(value or '未填写')}</li>" for key, value in clues.items()) + "</ul>"
 
-    def content_for(self, mode: str) -> tuple[str, str]:
+    def content_for(self, mode: str, answer_screen: bool = False) -> tuple[str, str]:
         counselor = self.current_counselor()
         name = counselor.id if counselor else ""
         timer = self.timer_text()
         if mode == "题目":
+            if answer_screen and not self.question_revealed:
+                return f"{self.current_round} - {name} - {timer}", "<p>题目已生成，点击“开始计时”后显示。</p>"
             return f"{self.current_round} - {name} - {timer}", self.question_html
         return f"标准信息 - {self.current_round} - {name} - {timer}", self.judge_html
 
     def update_displays(self) -> None:
-        q_title, q_body = self.content_for(self.question_content.currentText())
+        q_title, q_body = self.content_for(self.question_content.currentText(), answer_screen=True)
         j_title, j_body = self.content_for(self.judge_content.currentText())
         zoom = self.zoom.value()
         self.question_window.set_content(q_title, q_body, zoom)
         self.judge_window.set_content(j_title, j_body, zoom)
-        self.preview.setHtml(f"<h2>答题屏预览</h2>{q_body}<hr><h2>评委屏预览</h2>{j_body}")
+        preview_body = f"<h2>答题屏预览</h2>{self.question_html}<hr><h2>评委屏预览</h2>{j_body}"
+        preview_image_width = max(70, int(95 * zoom / 100))
+        self.preview.setHtml(build_html_document(preview_body, zoom, preview_image_width, preview=True))
+
+    def update_display_titles(self) -> None:
+        q_title, _ = self.content_for(self.question_content.currentText(), answer_screen=True)
+        j_title, _ = self.content_for(self.judge_content.currentText())
+        self.question_window.set_title(q_title)
+        self.judge_window.set_title(j_title)
 
     def show_displays(self) -> None:
         self.question_window.move_to_screen(int(self.question_screen.currentData() or 0))
@@ -400,3 +406,53 @@ class CompetitionControlWindow(QMainWindow):
         if self.close_callback:
             self.close_callback()
         super().closeEvent(event)
+
+
+def build_html_document(body: str, zoom: int, image_width: int, preview: bool = False) -> str:
+    font_size = max(13, int((15 if preview else 18) * zoom / 100))
+    margin = 12 if preview else 22
+    gap = 10 if preview else 16
+    padding = 6 if preview else 10
+    return f"""
+    <html>
+    <head>
+    <style>
+    body {{
+        font-family: 'Microsoft YaHei', 'PingFang SC', sans-serif;
+        font-size: {font_size}px;
+        line-height: 1.55;
+        margin: {margin}px;
+    }}
+    h2 {{
+        font-size: {font_size + 3}px;
+        margin: 8px 0;
+    }}
+    .grid {{
+        display: flex;
+        flex-wrap: wrap;
+        gap: {gap}px;
+    }}
+    .card {{
+        border: 1px solid #90a4ae;
+        border-radius: 6px;
+        padding: {padding}px;
+        margin: 6px;
+        display: inline-block;
+        vertical-align: top;
+    }}
+    img {{
+        max-width: {image_width}px;
+        max-height: {image_width}px;
+    }}
+    pre {{
+        white-space: pre-wrap;
+        font-family: 'Microsoft YaHei', 'PingFang SC', sans-serif;
+    }}
+    .muted {{
+        color: #607d8b;
+    }}
+    </style>
+    </head>
+    <body>{body}</body>
+    </html>
+    """
