@@ -17,6 +17,7 @@ ADMIN_CONFIG = "admin_config.json"
 CONTEST_CONFIG = "contest_config.json"
 CONTEST_SETTINGS = "contest_settings.json"
 SCORES_FILE = "scores.json"
+ATTEMPTS_FILE = "contest_attempts.json"
 CURRENT_ACTIVITY_FILE = ".current_activity.json"
 
 DEFAULT_ADMIN = {"username": "admin", "password": "admin123"}
@@ -29,6 +30,7 @@ DEFAULT_CONTEST_SETTINGS = {
     "mixed_own_count": 2,
     "mixed_distractor_count": 8,
     "locate_question_count": 2,
+    "enabled_rounds": ["大海捞针", "鱼目混珠", "描述定位"],
     "answer_fields": [
         "姓名",
         "专业",
@@ -307,7 +309,27 @@ def is_safe_zip_member(member: str) -> bool:
     return ".." not in path.parts and not any(":" in part for part in path.parts)
 
 
-def upload_zip(zip_path: Path, activity_path: Path, overwrite: bool = False) -> dict[str, list[str]]:
+def clear_activity_counselor_data(activity_path: Path) -> None:
+    for excel in list(activity_path.glob("*.xls")) + list(activity_path.glob("*.xlsx")):
+        excel.unlink()
+    for path in activity_path.iterdir():
+        if path.is_dir() and not path.name.startswith("."):
+            shutil.rmtree(path)
+    score_file = scores_path(activity_path)
+    if score_file.exists():
+        score_file.unlink()
+    attempts_file = attempts_path(activity_path)
+    if attempts_file.exists():
+        attempts_file.unlink()
+    save_contest_counselors(activity_path, [])
+
+
+def upload_zip(
+    zip_path: Path,
+    activity_path: Path,
+    overwrite: bool = False,
+    replace_existing: bool = False,
+) -> dict[str, list[str]]:
     ensure_dir(activity_path)
     report = {"imported": [], "skipped": [], "warnings": [], "errors": []}
     with zipfile.ZipFile(zip_path) as zf:
@@ -337,12 +359,17 @@ def upload_zip(zip_path: Path, activity_path: Path, overwrite: bool = False) -> 
 
             excel_bases = {p.stem for p in list(tmp.glob("*.xls")) + list(tmp.glob("*.xlsx"))}
             folder_bases = {p.name for p in tmp.iterdir() if p.is_dir()}
+            complete_bases: list[tuple[str, Path, Path]] = []
             for base in sorted(excel_bases | folder_bases):
                 excel = next((tmp / f"{base}{suffix}" for suffix in (".xls", ".xlsx") if (tmp / f"{base}{suffix}").exists()), None)
                 folder = tmp / base
                 if not excel or not folder.is_dir():
                     report["errors"].append(f"{base} 缺少同名 Excel 或照片文件夹")
                     continue
+                complete_bases.append((base, excel, folder))
+            if replace_existing and complete_bases:
+                clear_activity_counselor_data(activity_path)
+            for base, excel, folder in complete_bases:
                 if (activity_path / excel.name).exists() or (activity_path / base).exists():
                     if not overwrite:
                         report["skipped"].append(base)
@@ -450,12 +477,23 @@ def get_contest_settings(activity_path: Optional[Path] = None) -> dict:
     settings = DEFAULT_CONTEST_SETTINGS.copy()
     data = read_json(global_contest_settings_path(), {})
     if isinstance(data, dict):
-        settings.update(data)
+        flat_data = {key: value for key, value in data.items() if key != "activities"}
+        settings.update(flat_data)
+        activities = data.get("activities", {})
+        if isinstance(activities, dict) and len(activities) == 1:
+            activity_settings = next(iter(activities.values()))
+            if isinstance(activity_settings, dict):
+                settings.update(activity_settings)
     fields = settings.get("answer_fields")
     if not isinstance(fields, list) or not fields:
         settings["answer_fields"] = DEFAULT_CONTEST_SETTINGS["answer_fields"]
-    elif "姓名" not in fields:
-        settings["answer_fields"] = ["姓名", *fields]
+    rounds = settings.get("enabled_rounds")
+    valid_rounds = {"大海捞针", "鱼目混珠", "描述定位"}
+    if not isinstance(rounds, list):
+        settings["enabled_rounds"] = DEFAULT_CONTEST_SETTINGS["enabled_rounds"]
+    else:
+        enabled = [round_name for round_name in rounds if round_name in valid_rounds]
+        settings["enabled_rounds"] = enabled or DEFAULT_CONTEST_SETTINGS["enabled_rounds"]
     return settings
 
 
@@ -467,6 +505,30 @@ def save_contest_settings(settings: dict, activity_path: Optional[Path] = None) 
 
 def scores_path(activity_path: Path) -> Path:
     return activity_path / SCORES_FILE
+
+
+def attempts_path(activity_path: Path) -> Path:
+    return activity_path / ATTEMPTS_FILE
+
+
+def load_attempts(activity_path: Path) -> dict[str, int]:
+    data = read_json(attempts_path(activity_path), {})
+    if not isinstance(data, dict):
+        return {}
+    result: dict[str, int] = {}
+    for counselor_id, value in data.items():
+        try:
+            result[str(counselor_id)] = int(value)
+        except (TypeError, ValueError):
+            result[str(counselor_id)] = 0
+    return result
+
+
+def record_counselor_attempt(activity_path: Path, counselor_id: str) -> int:
+    attempts = load_attempts(activity_path)
+    attempts[counselor_id] = attempts.get(counselor_id, 0) + 1
+    write_json(attempts_path(activity_path), attempts)
+    return attempts[counselor_id]
 
 
 def load_scores(activity_path: Path) -> dict[str, dict[str, float]]:

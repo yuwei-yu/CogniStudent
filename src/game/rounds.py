@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from data.models import Student
+from game import data_manager
 
 
 INFO_KEYS = [
@@ -84,4 +85,20 @@ def build_locate_questions(students: list[Student], count: int = 2) -> list[Loca
 def format_student_answer(student: Student, answer_fields: Optional[list[str]] = None) -> str:
     values = student.answer_fields()
     fields = answer_fields or list(values.keys())
-    return "\n".join(f"{key}：{values.get(key, '') or '未填写'}" for key in fields)
+    return "\n".join(f"{key}：{student_field_value(student, key, values)}" for key in fields)
+
+
+def student_field_value(student: Student, field: str, canonical_values: Optional[dict[str, str]] = None) -> str:
+    values = canonical_values or student.answer_fields()
+    if field in values:
+        return values.get(field, "")
+    if field in student.extra:
+        return student.extra.get(field, "")
+    for canonical, aliases in data_manager.COLUMN_ALIASES.items():
+        if field == canonical or field in aliases:
+            return values.get(canonical, student.extra.get(canonical, ""))
+    stripped = field.strip()
+    for key, value in student.extra.items():
+        if str(key).strip() == stripped:
+            return value
+    return ""
