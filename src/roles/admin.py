@@ -173,7 +173,11 @@ class AdminWindow(QMainWindow):
 
         self.table = QTableWidget(0, 7)
         self.table.setHorizontalHeaderLabels(["参赛", "姓名", "工号", "学生数", "次数", "Excel", "照片文件夹"])
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.Stretch)
+        header.setSectionResizeMode(0, QHeaderView.Fixed)
+        self.table.setColumnWidth(0, 132)
+        self.table.verticalHeader().setDefaultSectionSize(52)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.MultiSelection)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -230,8 +234,15 @@ class AdminWindow(QMainWindow):
                 counselor.photos_dir.name,
             ]
             button = QPushButton("开始比赛" if attempts_count <= 0 else "再次参赛")
+            button.setMinimumHeight(34)
+            button.setMaximumWidth(104)
             button.clicked.connect(partial(self.start_counselor_competition, counselor))
-            self.table.setCellWidget(row, 0, button)
+            button_box = QWidget()
+            button_layout = QHBoxLayout(button_box)
+            button_layout.setContentsMargins(10, 6, 10, 6)
+            button_layout.addWidget(button)
+            self.table.setCellWidget(row, 0, button_box)
+            self.table.setRowHeight(row, 52)
             for col, value in enumerate(values, start=1):
                 item = QTableWidgetItem(value)
                 item.setData(Qt.UserRole, counselor.id)
