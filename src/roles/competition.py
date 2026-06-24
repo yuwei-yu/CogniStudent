@@ -234,16 +234,17 @@ class CompetitionControlWindow(QMainWindow):
                     count=int(self.settings["needle_student_count"]),
                     duration_seconds=int(self.settings["needle_duration_seconds"]),
                 )
+                number_by_id = self.student_number_map(round_data.students)
                 self.question_body_builder = (
-                    lambda students=round_data.students: self.render_question_screen(
-                        students, students
+                    lambda students=round_data.students, numbers=number_by_id: self.render_question_screen(
+                        students, students, numbers
                     )
                 )
                 self.question_html = self.question_body_builder()
                 self.answer_html = self.render_round_answer_table(round_data.students)
                 self.judge_body_builder = (
-                    lambda columns, students=round_data.students: self.render_answers(
-                        students, judge=True, columns=columns
+                    lambda columns, students=round_data.students, numbers=number_by_id: self.render_judge_comparison_table(
+                        students, numbers
                     )
                 )
                 self.judge_html = self.judge_body_builder(self.judge_columns())
@@ -264,9 +265,10 @@ class CompetitionControlWindow(QMainWindow):
                     duration_seconds=int(self.settings["mixed_duration_seconds"]),
                 )
                 all_students = round_data.all_students
+                number_by_id = self.student_number_map(all_students)
                 self.question_body_builder = (
-                    lambda photo_students=all_students, info_students=round_data.own_students: self.render_question_screen(
-                        photo_students, info_students
+                    lambda photo_students=all_students, info_students=round_data.own_students, numbers=number_by_id: self.render_question_screen(
+                        photo_students, info_students, numbers
                     )
                 )
                 self.question_html = self.question_body_builder()
@@ -275,9 +277,9 @@ class CompetitionControlWindow(QMainWindow):
                     + self.render_round_answer_table(round_data.own_students)
                 )
                 self.judge_body_builder = (
-                    lambda columns, students=round_data.own_students: (
+                    lambda columns, students=round_data.own_students, numbers=number_by_id: (
                         "<h2>本人学生标准信息</h2>"
-                        + self.render_answers(students, judge=True, columns=columns)
+                        + self.render_judge_comparison_table(students, numbers)
                     )
                 )
                 self.judge_html = self.judge_body_builder(self.judge_columns())
@@ -497,12 +499,17 @@ class CompetitionControlWindow(QMainWindow):
         return "".join(cards)
 
     def render_question_screen(
-        self, photo_students: list[Student], info_students: list[Student]
+        self,
+        photo_students: list[Student],
+        info_students: list[Student],
+        number_by_id: Optional[dict[int, int]] = None,
     ) -> str:
         body = self.render_question_intro() + self.render_photo_cards(photo_students)
         if self.info_visible:
             body += "<h2 class='student-info-title'>学生信息</h2>"
-            body += self.render_answer_table(info_students, include_answer_label=False)
+            body += self.render_answer_table(
+                info_students, include_answer_label=False, number_by_id=number_by_id
+            )
         return body
 
     def render_question_intro(self) -> str:
@@ -582,6 +589,45 @@ class CompetitionControlWindow(QMainWindow):
         cards.append("</table>")
         return "".join(cards)
 
+    def student_number_map(self, students: list[Student]) -> dict[int, int]:
+        return {id(student): index for index, student in enumerate(students, start=1)}
+
+    def render_judge_comparison_table(
+        self, students: list[Student], number_by_id: dict[int, int]
+    ) -> str:
+        if not students:
+            return "<p class='empty'>暂无标准信息。</p>"
+        fields = ["姓名", *[field for field in self.answer_fields if field != "姓名"]]
+        headers = ["字段"] + [
+            f"编号 {number_by_id.get(id(student), index)}"
+            for index, student in enumerate(students, start=1)
+        ]
+        rows = [
+            "<table class='judge-comparison-table' width='100%' cellspacing='0' cellpadding='0'>",
+            "<thead><tr>",
+            "".join(f"<th>{escape(header)}</th>" for header in headers),
+            "</tr></thead><tbody>",
+            "<tr><td class='judge-field-cell'>照片</td>",
+        ]
+        for student in students:
+            rows.append(
+                "<td class='judge-student-photo-cell'>"
+                f"{self.image_tag(student, image_width=118)}"
+                "</td>"
+            )
+        rows.append("</tr>")
+        for field in fields:
+            rows.append(f"<tr><td class='judge-field-cell'>{escape(str(field))}</td>")
+            for student in students:
+                rows.append(
+                    "<td class='judge-value-cell'>"
+                    f"{escape(str(student_field_value(student, field, student.answer_fields())))}"
+                    "</td>"
+                )
+            rows.append("</tr>")
+        rows.append("</tbody></table>")
+        return "".join(rows)
+
     def render_answer_fields(self, student: Student, include_name: bool = True) -> str:
         values = student.answer_fields()
         rows = []
@@ -607,7 +653,10 @@ class CompetitionControlWindow(QMainWindow):
         )
 
     def render_answer_table(
-        self, students: list[Student], include_answer_label: bool = True
+        self,
+        students: list[Student],
+        include_answer_label: bool = True,
+        number_by_id: Optional[dict[int, int]] = None,
     ) -> str:
         fields = [
             field
@@ -624,7 +673,7 @@ class CompetitionControlWindow(QMainWindow):
             "</tr></thead><tbody>",
         ]
         for index, student in enumerate(students, start=1):
-            cells = [str(index)]
+            cells = [str(number_by_id.get(id(student), index) if number_by_id else index)]
             if include_answer_label:
                 cells.append(student.name)
             cells.extend(
@@ -915,6 +964,59 @@ def build_html_document(
         border-radius: 6px;
         padding: 14px 16px;
         font-weight: 600;
+    }}
+    .judge-comparison-table {{
+        margin-top: 14px;
+        table-layout: fixed;
+        border-collapse: collapse;
+        background: #ffffff;
+        border: 1px solid #d7dde2;
+        box-shadow: 0 8px 22px rgba(15, 23, 42, 0.06);
+    }}
+    .judge-comparison-table th {{
+        padding: 14px 16px;
+        border: 1px solid #d7dde2;
+        background: #f1f4f7;
+        color: #1f2937;
+        font-size: {font_size + 1}px;
+        font-weight: 900;
+        text-align: center;
+        word-break: break-word;
+    }}
+    .judge-comparison-table th:first-child {{
+        width: 128px;
+        text-align: left;
+    }}
+    .judge-comparison-table td {{
+        padding: 14px 16px;
+        border: 1px solid #dce2e7;
+        color: #25313b;
+        background: #ffffff;
+        font-size: {font_size}px;
+        line-height: 1.48;
+        vertical-align: top;
+        word-break: break-word;
+        white-space: normal;
+    }}
+    .judge-comparison-table tbody tr:nth-child(even) td {{
+        background: #f8fafb;
+    }}
+    .judge-field-cell {{
+        width: 128px;
+        color: #5c6a78;
+        font-weight: 800;
+        white-space: nowrap;
+    }}
+    .judge-value-cell {{
+        font-weight: 650;
+    }}
+    .judge-student-photo-cell {{
+        text-align: center;
+        vertical-align: middle;
+        background: #fbfcfd;
+    }}
+    .judge-student-photo-cell .photo-img, .judge-student-photo-cell img {{
+        border-radius: 10px;
     }}
     .answer-info-table {{
         border-collapse: separate;
