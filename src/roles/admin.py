@@ -135,7 +135,7 @@ class AdminWindow(QMainWindow):
         row = QHBoxLayout()
         for group_title, actions in (
             ("资料", (
-                ("上传资料压缩包", self.upload_zip),
+                ("上传资料", self.upload_zip),
                 ("下载上传模板", self.download_template),
                 ("刷新", self.refresh_counselors),
             )),
@@ -171,8 +171,8 @@ class AdminWindow(QMainWindow):
         filter_row.addWidget(self.page_label)
         layout.addLayout(filter_row)
 
-        self.table = QTableWidget(0, 7)
-        self.table.setHorizontalHeaderLabels(["参赛", "姓名", "工号", "学生数", "次数", "Excel", "照片文件夹"])
+        self.table = QTableWidget(0, 6)
+        self.table.setHorizontalHeaderLabels(["参赛", "姓名", "工号", "学生数", "次数", "Excel"])
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.Stretch)
         header.setSectionResizeMode(0, QHeaderView.Fixed)
@@ -231,7 +231,6 @@ class AdminWindow(QMainWindow):
                 self.student_count_text(counselor),
                 str(attempts_count),
                 counselor.excel_path.name,
-                counselor.photos_dir.name,
             ]
             button = QPushButton("开始比赛" if attempts_count <= 0 else "再次参赛")
             button.setMinimumHeight(34)
@@ -374,13 +373,17 @@ class AdminWindow(QMainWindow):
         if not self.activity_path:
             QMessageBox.warning(self, "未选择活动", "请先进入一个活动。")
             return
-        zip_file, _ = QFileDialog.getOpenFileName(self, "选择资料压缩包", "", "Zip files (*.zip)")
-        if not zip_file:
+        data_file, _ = QFileDialog.getOpenFileName(self, "选择资料文件", "", "Excel/Zip files (*.xlsx *.zip)")
+        if not data_file:
             return
-        if QMessageBox.question(self, "确认覆盖", "上传新资料会删除当前活动下已导入的所有辅导员资料、答题次数和成绩，然后使用本次压缩包重新导入。是否继续？") != QMessageBox.Yes:
+        if QMessageBox.question(self, "确认覆盖", "上传新资料会删除当前活动下已导入的所有辅导员资料、答题次数和成绩，然后使用本次资料重新导入。是否继续？") != QMessageBox.Yes:
             return
         try:
-            report = data_manager.upload_zip(Path(zip_file), self.activity_path, overwrite=True, replace_existing=True)
+            path = Path(data_file)
+            if path.suffix.lower() == ".zip":
+                report = data_manager.upload_zip(path, self.activity_path, overwrite=True, replace_existing=True)
+            else:
+                report = data_manager.upload_excel(path, self.activity_path, overwrite=True, replace_existing=True)
         except Exception as exc:
             QMessageBox.critical(self, "导入失败", str(exc))
             return

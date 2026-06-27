@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import zipfile
 from datetime import datetime
@@ -8,6 +9,7 @@ from pathlib import Path, PurePosixPath
 from typing import Iterable, Optional
 
 import pandas as pd
+from openpyxl import load_workbook
 
 from data.models import Counselor, Student
 from utils.helpers import app_root, bundled_root, copy_file, ensure_dir, read_json, resources_root, safe_activity_name, write_json
@@ -77,6 +79,8 @@ COLUMN_ALIASES = {
 }
 
 CURRENT_ACTIVITY: Optional[str] = None
+PHOTO_CACHE_DIR = ".photo_cache"
+PHOTO_SUFFIXES = (".jpg", ".jpeg", ".png", ".JPG", ".JPEG", ".PNG")
 
 
 def bootstrap() -> None:
@@ -154,8 +158,6 @@ def get_counselors(activity_path: Path) -> list[Counselor]:
     for excel in excel_files:
         base = excel.stem
         photos_dir = activity_path / base
-        if not photos_dir.is_dir():
-            continue
         name, employee_id = split_counselor_base(base)
         result.append(Counselor(name=name, employee_id=employee_id, base_name=base, excel_path=excel, photos_dir=photos_dir))
     return result
@@ -205,26 +207,154 @@ def validate_excel_columns(excel_path: Path) -> list[str]:
     return [col for col in REQUIRED_COLUMNS if col not in df.columns]
 
 
+def photo_cache_path(excel_path: Path) -> Path:
+    return excel_path.parent / PHOTO_CACHE_DIR / excel_path.stem
+
+
+def safe_photo_stem(value: str, fallback: str) -> str:
+    cleaned = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff._-]+", "_", value.strip())
+    cleaned = cleaned.strip("._-")
+    return cleaned or fallback
+
+
+def image_extension(image, data: bytes) -> str:
+    suffix = Path(str(getattr(image, "path", ""))).suffix.lower()
+    if suffix in {".jpg", ".jpeg", ".png", ".gif", ".bmp"}:
+        return suffix
+    if data.startswith(b"\xff\xd8\xff"):
+        return ".jpg"
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png"
+    if data.startswith(b"GIF8"):
+        return ".gif"
+    if data.startswith(b"BM"):
+        return ".bmp"
+    return ".png"
+
+
+def image_anchor_row(image) -> Optional[int]:
+    marker = getattr(getattr(image, "anchor", None), "_from", None)
+    row = getattr(marker, "row", None)
+    if row is None:
+        return None
+    return int(row) + 1
+
+
+def cache_marker(excel_path: Path) -> dict[str, object]:
+    stat = excel_path.stat()
+    return {
+        "excel": excel_path.name,
+        "mtime_ns": stat.st_mtime_ns,
+        "size": stat.st_size,
+    }
+
+
+def load_cached_excel_photos(excel_path: Path) -> Optional[dict[int, Path]]:
+    cache_dir = photo_cache_path(excel_path)
+    marker_path = cache_dir / "manifest.json"
+    data = read_json(marker_path, {})
+    if not isinstance(data, dict):
+        return None
+    current = cache_marker(excel_path)
+    if any(data.get(key) != value for key, value in current.items()):
+        return None
+    rows = data.get("rows", {})
+    if not isinstance(rows, dict):
+        return None
+    result: dict[int, Path] = {}
+    for row, filename in rows.items():
+        try:
+            row_number = int(row)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(filename, str):
+            continue
+        path = cache_dir / filename
+        if not path.exists():
+            return None
+        result[row_number] = path
+    return result
+
+
+def extract_excel_photos(excel_path: Path, df: pd.DataFrame) -> dict[int, Path]:
+    if excel_path.suffix.lower() != ".xlsx":
+        return {}
+    cached = load_cached_excel_photos(excel_path)
+    if cached is not None:
+        return cached
+
+    cache_dir = photo_cache_path(excel_path)
+    if cache_dir.exists():
+        shutil.rmtree(cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    workbook = load_workbook(excel_path, data_only=True)
+    try:
+        worksheet = workbook.active
+        images = sorted(
+            worksheet._images,
+            key=lambda image: image_anchor_row(image) or 0,
+        )
+        row_counts: dict[int, int] = {}
+        rows: dict[int, str] = {}
+        for image in images:
+            row_number = image_anchor_row(image)
+            if row_number is None or row_number <= 1:
+                continue
+            try:
+                data = image._data()
+            except Exception:
+                continue
+            if not data:
+                continue
+            df_index = row_number - 2
+            if 0 <= df_index < len(df.index):
+                student_id = clean_cell(df.iloc[df_index].get("学号", ""))
+            else:
+                student_id = ""
+            count = row_counts.get(row_number, 0) + 1
+            row_counts[row_number] = count
+            stem = safe_photo_stem(student_id, f"row_{row_number}")
+            suffix = image_extension(image, data)
+            filename = f"{stem}{suffix}" if count == 1 else f"{stem}_{count}{suffix}"
+            target = cache_dir / filename
+            target.write_bytes(data)
+            rows[row_number] = filename
+    finally:
+        workbook.close()
+
+    manifest = cache_marker(excel_path)
+    manifest["rows"] = rows
+    write_json(cache_dir / "manifest.json", manifest)
+    return {int(row): cache_dir / filename for row, filename in rows.items()}
+
+
 def find_photo(photos_dir: Path, student_id: str) -> Optional[Path]:
     sid = str(student_id).strip()
-    for suffix in (".jpg", ".jpeg", ".png", ".JPG", ".JPEG", ".PNG"):
+    if not photos_dir.is_dir():
+        return None
+    for suffix in PHOTO_SUFFIXES:
         candidate = photos_dir / f"{sid}{suffix}"
         if candidate.exists():
             return candidate
     return None
 
 
-def load_students(excel_path: Path, photos_dir: Path) -> list[Student]:
+def load_students(excel_path: Path, photos_dir: Optional[Path] = None) -> list[Student]:
     df = normalize_columns(read_excel(excel_path))
+    photos_by_row = extract_excel_photos(excel_path, df)
     students: list[Student] = []
     counselor_id = excel_path.stem
-    for _, row in df.iterrows():
+    for position, (_, row) in enumerate(df.iterrows()):
         extra = {str(k): clean_cell(v) for k, v in row.items()}
         if not any(extra.values()):
             continue
         student_id = clean_cell(row.get("学号", ""))
         name = clean_cell(row.get("姓名", ""))
-        photo_path = find_photo(photos_dir, student_id)
+        excel_row = position + 2
+        photo_path = photos_by_row.get(excel_row)
+        if photo_path is None and photos_dir is not None:
+            photo_path = find_photo(photos_dir, student_id)
         students.append(
             Student(
                 student_id=student_id,
@@ -265,9 +395,6 @@ def validate_counselor_pair(activity_path: Path, base_name: str) -> tuple[bool, 
     warnings: list[str] = []
     if not excel.exists():
         errors.append(f"缺少 Excel：{base_name}.xls/.xlsx")
-        return False, errors, warnings
-    if not photos_dir.is_dir():
-        errors.append(f"缺少照片文件夹：{base_name}")
         return False, errors, warnings
     missing_columns = validate_excel_columns(excel)
     if missing_columns:
@@ -315,6 +442,9 @@ def clear_activity_counselor_data(activity_path: Path) -> None:
     for path in activity_path.iterdir():
         if path.is_dir() and not path.name.startswith("."):
             shutil.rmtree(path)
+    cache_dir = activity_path / PHOTO_CACHE_DIR
+    if cache_dir.exists():
+        shutil.rmtree(cache_dir)
     score_file = scores_path(activity_path)
     if score_file.exists():
         score_file.unlink()
@@ -358,15 +488,14 @@ def upload_zip(
                     shutil.copyfileobj(src, dst)
 
             excel_bases = {p.stem for p in list(tmp.glob("*.xls")) + list(tmp.glob("*.xlsx"))}
-            folder_bases = {p.name for p in tmp.iterdir() if p.is_dir()}
-            complete_bases: list[tuple[str, Path, Path]] = []
-            for base in sorted(excel_bases | folder_bases):
+            complete_bases: list[tuple[str, Path, Optional[Path]]] = []
+            for base in sorted(excel_bases):
                 excel = next((tmp / f"{base}{suffix}" for suffix in (".xls", ".xlsx") if (tmp / f"{base}{suffix}").exists()), None)
                 folder = tmp / base
-                if not excel or not folder.is_dir():
-                    report["errors"].append(f"{base} 缺少同名 Excel 或照片文件夹")
+                if not excel:
+                    report["errors"].append(f"{base} 缺少 Excel")
                     continue
-                complete_bases.append((base, excel, folder))
+                complete_bases.append((base, excel, folder if folder.is_dir() else None))
             if replace_existing and complete_bases:
                 clear_activity_counselor_data(activity_path)
             for base, excel, folder in complete_bases:
@@ -379,7 +508,8 @@ def upload_zip(
                     if (activity_path / base).exists():
                         shutil.rmtree(activity_path / base)
                 shutil.move(str(excel), str(activity_path / excel.name))
-                shutil.move(str(folder), str(activity_path / base))
+                if folder is not None:
+                    shutil.move(str(folder), str(activity_path / base))
                 report["imported"].append(base)
                 ok, errors, warnings = validate_counselor_pair(activity_path, base)
                 report["warnings"].extend(warnings)
@@ -388,6 +518,48 @@ def upload_zip(
         finally:
             if tmp.exists():
                 shutil.rmtree(tmp)
+    return report
+
+
+def upload_excel(
+    excel_path: Path,
+    activity_path: Path,
+    overwrite: bool = False,
+    replace_existing: bool = False,
+) -> dict[str, list[str]]:
+    ensure_dir(activity_path)
+    report = {"imported": [], "skipped": [], "warnings": [], "errors": []}
+    if excel_path.suffix.lower() != ".xlsx":
+        report["errors"].append(f"{excel_path.name} 不是 .xlsx 文件")
+        return report
+    base = excel_path.stem
+    if not base:
+        report["errors"].append("Excel 文件名不能为空")
+        return report
+    target = activity_path / excel_path.name
+    if excel_path.resolve() == target.resolve():
+        temp_source = activity_path / ".upload_tmp" / excel_path.name
+        temp_source.parent.mkdir(parents=True, exist_ok=True)
+        copy_file(excel_path, temp_source)
+        excel_path = temp_source
+    if replace_existing:
+        clear_activity_counselor_data(activity_path)
+    elif target.exists():
+        if not overwrite:
+            report["skipped"].append(base)
+            return report
+        target.unlink()
+    try:
+        copy_file(excel_path, target)
+        report["imported"].append(base)
+        ok, errors, warnings = validate_counselor_pair(activity_path, base)
+        report["warnings"].extend(warnings)
+        if not ok:
+            report["errors"].extend(errors)
+    finally:
+        temp_dir = activity_path / ".upload_tmp"
+        if temp_dir.exists():
+            shutil.rmtree(temp_dir)
     return report
 
 
