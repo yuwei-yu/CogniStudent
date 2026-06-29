@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import posixpath
 import re
 import shutil
+import xml.etree.ElementTree as ET
 import zipfile
 from datetime import datetime
 from pathlib import Path, PurePosixPath
@@ -89,8 +91,15 @@ COLUMN_ALIASES = {
 CURRENT_ACTIVITY: Optional[str] = None
 BOOTSTRAPPED = False
 PHOTO_CACHE_DIR = ".photo_cache"
-PHOTO_CACHE_VERSION = 2
+PHOTO_CACHE_VERSION = 3
 PHOTO_SUFFIXES = (".jpg", ".jpeg", ".png", ".JPG", ".JPEG", ".PNG")
+NS_DRAWING = {
+    "a": "http://schemas.openxmlformats.org/drawingml/2006/main",
+    "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+    "xdr": "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing",
+}
+REL_NS = "{http://schemas.openxmlformats.org/package/2006/relationships}"
+OFFICE_REL_NS = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
 
 
 def bootstrap() -> None:
@@ -240,6 +249,10 @@ def image_extension(image, data: bytes) -> str:
     suffix = Path(str(getattr(image, "path", ""))).suffix.lower()
     if suffix in {".jpg", ".jpeg", ".png", ".gif", ".bmp"}:
         return suffix
+    return image_data_extension(data)
+
+
+def image_data_extension(data: bytes) -> str:
     if data.startswith(b"\xff\xd8\xff"):
         return ".jpg"
     if data.startswith(b"\x89PNG\r\n\x1a\n"):
@@ -304,6 +317,109 @@ def image_sort_key(image) -> int:
     return int((image_anchor_row(image) or 0) * 1000)
 
 
+def xlsx_part_rels_path(part_path: str) -> str:
+    return posixpath.join(posixpath.dirname(part_path), "_rels", f"{posixpath.basename(part_path)}.rels")
+
+
+def resolve_xlsx_target(source_part: str, target: str) -> str:
+    if target.startswith("/"):
+        return posixpath.normpath(target.lstrip("/"))
+    return posixpath.normpath(posixpath.join(posixpath.dirname(source_part), target))
+
+
+def xlsx_relationships(zf: zipfile.ZipFile, part_path: str) -> dict[str, tuple[str, str]]:
+    rels_path = xlsx_part_rels_path(part_path)
+    if rels_path not in zf.namelist():
+        return {}
+    root = ET.fromstring(zf.read(rels_path))
+    relationships: dict[str, tuple[str, str]] = {}
+    for rel in root:
+        rel_id = rel.attrib.get("Id")
+        target = rel.attrib.get("Target")
+        rel_type = rel.attrib.get("Type", "")
+        if not rel_id or not target or rel.attrib.get("TargetMode") == "External":
+            continue
+        relationships[rel_id] = (resolve_xlsx_target(part_path, target), rel_type)
+    return relationships
+
+
+def worksheet_part_path(zf: zipfile.ZipFile, worksheet) -> str:
+    path = str(getattr(worksheet, "path", "")).lstrip("/")
+    if path in zf.namelist():
+        return path
+    worksheet_parts = sorted(name for name in zf.namelist() if name.startswith("xl/worksheets/") and name.endswith(".xml"))
+    return worksheet_parts[0] if worksheet_parts else ""
+
+
+def drawing_anchor_center(anchor) -> tuple[Optional[int], Optional[float]]:
+    marker = anchor.find("xdr:from", NS_DRAWING)
+    if marker is None:
+        return None, None
+    row_text = marker.findtext("xdr:row", namespaces=NS_DRAWING)
+    if row_text is None:
+        return None, None
+    start_row = int(row_text)
+    start_offset_text = marker.findtext("xdr:rowOff", default="0", namespaces=NS_DRAWING)
+    start_offset = int(start_offset_text or 0)
+    end_marker = anchor.find("xdr:to", NS_DRAWING)
+    if end_marker is None:
+        return start_row + 1, float(start_row + 1)
+    end_row_text = end_marker.findtext("xdr:row", namespaces=NS_DRAWING)
+    if end_row_text is None:
+        return start_row + 1, float(start_row + 1)
+    end_row = int(end_row_text)
+    end_offset_text = end_marker.findtext("xdr:rowOff", default="0", namespaces=NS_DRAWING)
+    end_offset = int(end_offset_text or 0)
+    start_pos = start_row + float(start_offset) / 9_525_000
+    end_pos = end_row + float(end_offset) / 9_525_000
+    return start_row + 1, ((start_pos + end_pos) / 2) + 1
+
+
+def raw_xlsx_image_items(excel_path: Path, worksheet) -> list[dict]:
+    items: list[dict] = []
+    with zipfile.ZipFile(excel_path) as zf:
+        sheet_part = worksheet_part_path(zf, worksheet)
+        if not sheet_part:
+            return items
+        sheet_rels = xlsx_relationships(zf, sheet_part)
+        drawing_parts = [target for target, rel_type in sheet_rels.values() if rel_type.endswith("/drawing")]
+        order = 0
+        for drawing_part in drawing_parts:
+            if drawing_part not in zf.namelist():
+                continue
+            drawing_rels = xlsx_relationships(zf, drawing_part)
+            root = ET.fromstring(zf.read(drawing_part))
+            for anchor in root:
+                if not str(anchor.tag).endswith("Anchor"):
+                    continue
+                blip = anchor.find(".//a:blip", NS_DRAWING)
+                if blip is None:
+                    continue
+                rel_id = blip.attrib.get(f"{OFFICE_REL_NS}embed") or blip.attrib.get(f"{OFFICE_REL_NS}link")
+                if not rel_id or rel_id not in drawing_rels:
+                    continue
+                media_part, rel_type = drawing_rels[rel_id]
+                if not rel_type.endswith("/image") or media_part not in zf.namelist():
+                    continue
+                data = zf.read(media_part)
+                if not data:
+                    continue
+                anchor_row, center = drawing_anchor_center(anchor)
+                suffix = Path(media_part).suffix.lower() or image_data_extension(data)
+                order_key = int((center or anchor_row or order) * 1000) + order
+                items.append(
+                    {
+                        "order": order_key,
+                        "center": center,
+                        "anchor_row": anchor_row,
+                        "data": data,
+                        "suffix": suffix,
+                    }
+                )
+                order += 1
+    return items
+
+
 def cache_marker(excel_path: Path) -> dict[str, object]:
     stat = excel_path.stat()
     return {
@@ -356,9 +472,12 @@ def photo_import_summary(excel_path: Path, base_name: str) -> Optional[str]:
     strategy = data.get("photo_strategy", "")
     photo_count = data.get("photo_count", "?")
     student_row_count = data.get("student_row_count", "?")
+    photo_source = data.get("photo_source", "")
     labels = {"anchor": "锚点匹配", "order": "顺序匹配"}
     label = labels.get(str(strategy), str(strategy) or "未知策略")
-    return f"{base_name} 照片导入采用{label}，读取 {photo_count} 张图片，命中 {len(rows)} / {student_row_count} 行"
+    source_labels = {"openpyxl": "常规读取", "raw": "底层解包"}
+    source_label = source_labels.get(str(photo_source), str(photo_source) or "未知来源")
+    return f"{base_name} 照片导入采用{source_label}+{label}，读取 {photo_count} 张图片，命中 {len(rows)} / {student_row_count} 行"
 
 
 def extract_excel_photos(excel_path: Path, df: pd.DataFrame) -> dict[int, Path]:
@@ -377,7 +496,7 @@ def extract_excel_photos(excel_path: Path, df: pd.DataFrame) -> dict[int, Path]:
     try:
         worksheet = workbook.active
         valid_rows = student_excel_rows(df)
-        image_items = []
+        openpyxl_items = []
         for image in sorted(worksheet._images, key=image_sort_key):
             try:
                 data = image._data()
@@ -385,7 +504,7 @@ def extract_excel_photos(excel_path: Path, df: pd.DataFrame) -> dict[int, Path]:
                 continue
             if not data:
                 continue
-            image_items.append(
+            openpyxl_items.append(
                 {
                     "order": image_sort_key(image),
                     "center": image_anchor_row_center(image),
@@ -394,6 +513,13 @@ def extract_excel_photos(excel_path: Path, df: pd.DataFrame) -> dict[int, Path]:
                     "suffix": image_extension(image, data),
                 }
             )
+        raw_items = raw_xlsx_image_items(excel_path, worksheet)
+        if len(raw_items) > len(openpyxl_items):
+            image_items = raw_items
+            photo_source = "raw"
+        else:
+            image_items = openpyxl_items
+            photo_source = "openpyxl"
         photo_rows, photo_strategy = best_photo_rows(image_items, valid_rows)
         rows = write_photo_rows(cache_dir, df, photo_rows)
     finally:
@@ -402,6 +528,7 @@ def extract_excel_photos(excel_path: Path, df: pd.DataFrame) -> dict[int, Path]:
     manifest = cache_marker(excel_path)
     manifest["rows"] = rows
     manifest["photo_strategy"] = photo_strategy
+    manifest["photo_source"] = photo_source
     manifest["photo_count"] = len(image_items)
     manifest["student_row_count"] = len(valid_rows)
     write_json(cache_dir / "manifest.json", manifest)
