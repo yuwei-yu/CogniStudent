@@ -89,6 +89,7 @@ COLUMN_ALIASES = {
 CURRENT_ACTIVITY: Optional[str] = None
 BOOTSTRAPPED = False
 PHOTO_CACHE_DIR = ".photo_cache"
+PHOTO_CACHE_VERSION = 2
 PHOTO_SUFFIXES = (".jpg", ".jpeg", ".png", ".JPG", ".JPEG", ".PNG")
 
 
@@ -306,6 +307,7 @@ def image_sort_key(image) -> int:
 def cache_marker(excel_path: Path) -> dict[str, object]:
     stat = excel_path.stat()
     return {
+        "photo_cache_version": PHOTO_CACHE_VERSION,
         "excel": excel_path.name,
         "mtime_ns": stat.st_mtime_ns,
         "size": stat.st_size,
@@ -352,9 +354,11 @@ def photo_import_summary(excel_path: Path, base_name: str) -> Optional[str]:
     if not isinstance(rows, dict):
         return None
     strategy = data.get("photo_strategy", "")
+    photo_count = data.get("photo_count", "?")
+    student_row_count = data.get("student_row_count", "?")
     labels = {"anchor": "锚点匹配", "order": "顺序匹配"}
     label = labels.get(str(strategy), str(strategy) or "未知策略")
-    return f"{base_name} 照片导入采用{label}，命中 {len(rows)} 张"
+    return f"{base_name} 照片导入采用{label}，读取 {photo_count} 张图片，命中 {len(rows)} / {student_row_count} 行"
 
 
 def extract_excel_photos(excel_path: Path, df: pd.DataFrame) -> dict[int, Path]:
@@ -398,6 +402,8 @@ def extract_excel_photos(excel_path: Path, df: pd.DataFrame) -> dict[int, Path]:
     manifest = cache_marker(excel_path)
     manifest["rows"] = rows
     manifest["photo_strategy"] = photo_strategy
+    manifest["photo_count"] = len(image_items)
+    manifest["student_row_count"] = len(valid_rows)
     write_json(cache_dir / "manifest.json", manifest)
     return {int(row): cache_dir / filename for row, filename in rows.items()}
 
@@ -632,14 +638,23 @@ def upload_zip(
                 with zf.open(info) as src, target.open("wb") as dst:
                     shutil.copyfileobj(src, dst)
 
-            excel_bases = {p.stem for p in list(tmp.glob("*.xls")) + list(tmp.glob("*.xlsx"))}
+            excel_files = sorted(
+                [
+                    p
+                    for p in list(tmp.rglob("*.xls")) + list(tmp.rglob("*.xlsx"))
+                    if not p.name.startswith("~$")
+                    and not any(part.startswith("__MACOSX") for part in p.parts)
+                ]
+            )
             complete_bases: list[tuple[str, Path, Optional[Path]]] = []
-            for base in sorted(excel_bases):
-                excel = next((tmp / f"{base}{suffix}" for suffix in (".xls", ".xlsx") if (tmp / f"{base}{suffix}").exists()), None)
-                folder = tmp / base
-                if not excel:
-                    report["errors"].append(f"{base} 缺少 Excel")
+            seen_bases: set[str] = set()
+            for excel in excel_files:
+                base = excel.stem
+                if base in seen_bases:
+                    report["errors"].append(f"{base} 存在重名 Excel，请修改文件名后重新导入")
                     continue
+                seen_bases.add(base)
+                folder = excel.parent / base
                 complete_bases.append((base, excel, folder if folder.is_dir() else None))
             if replace_existing and complete_bases:
                 clear_activity_counselor_data(activity_path)
@@ -657,10 +672,10 @@ def upload_zip(
                     shutil.move(str(folder), str(activity_path / base))
                 report["imported"].append(base)
                 ok, errors, warnings = validate_counselor_pair(activity_path, base)
-                report["warnings"].extend(warnings)
                 summary = photo_import_summary(activity_path / excel.name, base)
                 if summary:
                     report["warnings"].append(summary)
+                report["warnings"].extend(warnings)
                 if not ok:
                     report["errors"].extend(errors)
         finally:
@@ -701,10 +716,10 @@ def upload_excel(
         copy_file(excel_path, target)
         report["imported"].append(base)
         ok, errors, warnings = validate_counselor_pair(activity_path, base)
-        report["warnings"].extend(warnings)
         summary = photo_import_summary(target, base)
         if summary:
             report["warnings"].append(summary)
+        report["warnings"].extend(warnings)
         if not ok:
             report["errors"].extend(errors)
     finally:
