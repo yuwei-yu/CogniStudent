@@ -12,7 +12,7 @@ import pandas as pd
 from openpyxl import load_workbook
 
 from data.models import Counselor, Student
-from utils.helpers import app_root, bundled_root, copy_file, ensure_dir, read_json, resources_root, safe_activity_name, write_json
+from utils.helpers import app_root, bundled_root, copy_file, ensure_dir, read_json, resources_root, write_json
 
 
 ADMIN_CONFIG = "admin_config.json"
@@ -21,6 +21,14 @@ CONTEST_SETTINGS = "contest_settings.json"
 SCORES_FILE = "scores.json"
 ATTEMPTS_FILE = "contest_attempts.json"
 CURRENT_ACTIVITY_FILE = ".current_activity.json"
+DEFAULT_ACTIVITY_NAME = "比赛"
+ROOT_RESOURCE_FILES = {
+    ADMIN_CONFIG,
+    CONTEST_SETTINGS,
+    CURRENT_ACTIVITY_FILE,
+    "judge_config.json",
+    "ui_config.json",
+}
 
 DEFAULT_ADMIN = {"username": "admin", "password": "admin123"}
 
@@ -79,15 +87,21 @@ COLUMN_ALIASES = {
 }
 
 CURRENT_ACTIVITY: Optional[str] = None
+BOOTSTRAPPED = False
 PHOTO_CACHE_DIR = ".photo_cache"
 PHOTO_SUFFIXES = (".jpg", ".jpeg", ".png", ".JPG", ".JPEG", ".PNG")
 
 
 def bootstrap() -> None:
+    global BOOTSTRAPPED
+    if BOOTSTRAPPED:
+        return
+    BOOTSTRAPPED = True
     root = ensure_dir(resources_root())
     ensure_default_config(root / ADMIN_CONFIG, DEFAULT_ADMIN)
     if not global_contest_settings_path().exists():
         save_contest_settings(DEFAULT_CONTEST_SETTINGS)
+    ensure_single_activity()
 
 
 def ensure_default_config(path: Path, default: dict[str, str]) -> None:
@@ -96,51 +110,55 @@ def ensure_default_config(path: Path, default: dict[str, str]) -> None:
 
 
 def get_activities() -> list[str]:
-    bootstrap()
-    ignored = {"__pycache__"}
-    return sorted(
-        p.name
-        for p in resources_root().iterdir()
-        if p.is_dir() and p.name not in ignored and not p.name.startswith(".")
-    )
+    ensure_single_activity()
+    return [DEFAULT_ACTIVITY_NAME]
 
 
 def activity_path(activity_name: str) -> Path:
-    return resources_root() / activity_name
+    return resources_root() / DEFAULT_ACTIVITY_NAME
 
 
 def set_current_activity(activity_name: str) -> None:
     global CURRENT_ACTIVITY
-    CURRENT_ACTIVITY = activity_name
-    write_json(resources_root() / CURRENT_ACTIVITY_FILE, {"activity": activity_name})
+    CURRENT_ACTIVITY = DEFAULT_ACTIVITY_NAME
+    write_json(resources_root() / CURRENT_ACTIVITY_FILE, {"activity": DEFAULT_ACTIVITY_NAME})
 
 
 def get_current_activity() -> Optional[str]:
     global CURRENT_ACTIVITY
-    if CURRENT_ACTIVITY:
-        return CURRENT_ACTIVITY
-    data = read_json(resources_root() / CURRENT_ACTIVITY_FILE, {})
-    value = data.get("activity")
-    if isinstance(value, str) and value in get_activities():
-        CURRENT_ACTIVITY = value
+    if CURRENT_ACTIVITY != DEFAULT_ACTIVITY_NAME:
+        CURRENT_ACTIVITY = DEFAULT_ACTIVITY_NAME
     return CURRENT_ACTIVITY
 
 
 def create_activity(name: str) -> Path:
-    cleaned = safe_activity_name(name)
-    if not cleaned:
-        raise ValueError("活动名称不能为空，且不能只包含非法字符。")
-    path = resources_root() / cleaned
-    if path.exists():
-        raise FileExistsError(f"活动已存在：{cleaned}")
+    path = activity_path(DEFAULT_ACTIVITY_NAME)
     path.mkdir(parents=True)
     return path
 
 
 def delete_activity(name: str) -> None:
-    path = activity_path(name)
+    path = activity_path(DEFAULT_ACTIVITY_NAME)
     if path.exists():
-        shutil.rmtree(path)
+        clear_activity_counselor_data(path)
+
+
+def ensure_single_activity() -> Path:
+    root = resources_root()
+    target = ensure_dir(root / DEFAULT_ACTIVITY_NAME)
+    legacy = root / "默认活动"
+    if legacy.exists() and legacy.is_dir() and legacy != target:
+        for source in legacy.iterdir():
+            destination = target / source.name
+            if destination.exists():
+                continue
+            shutil.move(str(source), str(destination))
+        try:
+            legacy.rmdir()
+        except OSError:
+            pass
+    write_json(root / CURRENT_ACTIVITY_FILE, {"activity": DEFAULT_ACTIVITY_NAME})
+    return target
 
 
 def split_counselor_base(base_name: str) -> tuple[str, str]:
@@ -232,12 +250,57 @@ def image_extension(image, data: bytes) -> str:
     return ".png"
 
 
+def image_anchor_marker(image, attr: str):
+    return getattr(getattr(image, "anchor", None), attr, None)
+
+
 def image_anchor_row(image) -> Optional[int]:
-    marker = getattr(getattr(image, "anchor", None), "_from", None)
+    marker = image_anchor_marker(image, "_from")
     row = getattr(marker, "row", None)
     if row is None:
         return None
     return int(row) + 1
+
+
+def image_anchor_row_center(image) -> Optional[float]:
+    start = image_anchor_marker(image, "_from")
+    end = image_anchor_marker(image, "to")
+    start_row = getattr(start, "row", None)
+    if start_row is None:
+        return None
+    end_row = getattr(end, "row", None)
+    if end_row is None:
+        return float(int(start_row) + 1)
+    start_offset = getattr(start, "rowOff", 0) or 0
+    end_offset = getattr(end, "rowOff", 0) or 0
+    # EMU offsets are row-local. Keep only their relative position so a picture
+    # anchored across rows maps to the row containing its visual center.
+    start_pos = int(start_row) + float(start_offset) / 9_525_000
+    end_pos = int(end_row) + float(end_offset) / 9_525_000
+    return ((start_pos + end_pos) / 2) + 1
+
+
+def student_excel_rows(df: pd.DataFrame) -> set[int]:
+    rows: set[int] = set()
+    for position, (_, row) in enumerate(df.iterrows()):
+        extra = {str(k): clean_cell(v) for k, v in row.items()}
+        if any(extra.values()):
+            rows.add(position + 2)
+    return rows
+
+
+def nearest_student_row(center: Optional[float], valid_rows: set[int]) -> Optional[int]:
+    if center is None or not valid_rows:
+        return None
+    nearest = min(valid_rows, key=lambda row: abs(row - center))
+    return nearest if abs(nearest - center) <= 1.25 else None
+
+
+def image_sort_key(image) -> int:
+    center = image_anchor_row_center(image)
+    if center is not None:
+        return int(center * 1000)
+    return int((image_anchor_row(image) or 0) * 1000)
 
 
 def cache_marker(excel_path: Path) -> dict[str, object]:
@@ -276,6 +339,24 @@ def load_cached_excel_photos(excel_path: Path) -> Optional[dict[int, Path]]:
     return result
 
 
+def photo_cache_manifest(excel_path: Path) -> dict:
+    data = read_json(photo_cache_path(excel_path) / "manifest.json", {})
+    return data if isinstance(data, dict) else {}
+
+
+def photo_import_summary(excel_path: Path, base_name: str) -> Optional[str]:
+    if excel_path.suffix.lower() != ".xlsx":
+        return None
+    data = photo_cache_manifest(excel_path)
+    rows = data.get("rows", {})
+    if not isinstance(rows, dict):
+        return None
+    strategy = data.get("photo_strategy", "")
+    labels = {"anchor": "锚点匹配", "order": "顺序匹配"}
+    label = labels.get(str(strategy), str(strategy) or "未知策略")
+    return f"{base_name} 照片导入采用{label}，命中 {len(rows)} 张"
+
+
 def extract_excel_photos(excel_path: Path, df: pd.DataFrame) -> dict[int, Path]:
     if excel_path.suffix.lower() != ".xlsx":
         return {}
@@ -291,42 +372,106 @@ def extract_excel_photos(excel_path: Path, df: pd.DataFrame) -> dict[int, Path]:
     workbook = load_workbook(excel_path, data_only=True)
     try:
         worksheet = workbook.active
-        images = sorted(
-            worksheet._images,
-            key=lambda image: image_anchor_row(image) or 0,
-        )
-        row_counts: dict[int, int] = {}
-        rows: dict[int, str] = {}
-        for image in images:
-            row_number = image_anchor_row(image)
-            if row_number is None or row_number <= 1:
-                continue
+        valid_rows = student_excel_rows(df)
+        image_items = []
+        for image in sorted(worksheet._images, key=image_sort_key):
             try:
                 data = image._data()
             except Exception:
                 continue
             if not data:
                 continue
-            df_index = row_number - 2
-            if 0 <= df_index < len(df.index):
-                student_id = clean_cell(df.iloc[df_index].get("学号", ""))
-            else:
-                student_id = ""
-            count = row_counts.get(row_number, 0) + 1
-            row_counts[row_number] = count
-            stem = safe_photo_stem(student_id, f"row_{row_number}")
-            suffix = image_extension(image, data)
-            filename = f"{stem}{suffix}" if count == 1 else f"{stem}_{count}{suffix}"
-            target = cache_dir / filename
-            target.write_bytes(data)
-            rows[row_number] = filename
+            image_items.append(
+                {
+                    "order": image_sort_key(image),
+                    "center": image_anchor_row_center(image),
+                    "anchor_row": image_anchor_row(image),
+                    "data": data,
+                    "suffix": image_extension(image, data),
+                }
+            )
+        photo_rows, photo_strategy = best_photo_rows(image_items, valid_rows)
+        rows = write_photo_rows(cache_dir, df, photo_rows)
     finally:
         workbook.close()
 
     manifest = cache_marker(excel_path)
     manifest["rows"] = rows
+    manifest["photo_strategy"] = photo_strategy
     write_json(cache_dir / "manifest.json", manifest)
     return {int(row): cache_dir / filename for row, filename in rows.items()}
+
+
+def best_photo_rows(image_items: list[dict], valid_rows: set[int]) -> tuple[dict[int, tuple[bytes, str]], str]:
+    anchor_rows = match_photos_by_anchor(image_items, valid_rows)
+    order_rows = match_photos_by_order(image_items, valid_rows)
+    if photo_match_score(order_rows, valid_rows) > photo_match_score(anchor_rows, valid_rows):
+        return order_rows, "order"
+    return anchor_rows, "anchor"
+
+
+def photo_match_score(rows: dict[int, tuple[bytes, str]], valid_rows: set[int]) -> tuple[int, int]:
+    return (len(set(rows) & valid_rows), -abs(len(rows) - len(valid_rows)))
+
+
+def match_photos_by_anchor(image_items: list[dict], valid_rows: set[int]) -> dict[int, tuple[bytes, str]]:
+    rows: dict[int, tuple[bytes, str]] = {}
+    pending: list[dict] = []
+    for item in image_items:
+        row_number = nearest_student_row(item["center"], valid_rows) or item["anchor_row"]
+        if row_number is None or row_number <= 1 or row_number not in valid_rows or row_number in rows:
+            pending.append(item)
+            continue
+        rows[row_number] = (item["data"], item["suffix"])
+
+    missing_rows = sorted(valid_rows - set(rows))
+    if pending and len(pending) == len(missing_rows):
+        for row_number, item in zip(missing_rows, sorted(pending, key=lambda value: value["order"])):
+            rows[row_number] = (item["data"], item["suffix"])
+    return rows
+
+
+def match_photos_by_order(image_items: list[dict], valid_rows: set[int]) -> dict[int, tuple[bytes, str]]:
+    rows: dict[int, tuple[bytes, str]] = {}
+    sorted_items = sorted(image_items, key=lambda value: value["order"])
+    for row_number, item in zip(sorted(valid_rows), sorted_items):
+        rows[row_number] = (item["data"], item["suffix"])
+    return rows
+
+
+def write_photo_rows(
+    cache_dir: Path,
+    df: pd.DataFrame,
+    photo_rows: dict[int, tuple[bytes, str]],
+) -> dict[int, str]:
+    row_counts: dict[int, int] = {}
+    rows: dict[int, str] = {}
+    for row_number, (data, suffix) in sorted(photo_rows.items()):
+        save_excel_photo(cache_dir, df, row_counts, rows, row_number, data, suffix)
+    return rows
+
+
+def save_excel_photo(
+    cache_dir: Path,
+    df: pd.DataFrame,
+    row_counts: dict[int, int],
+    rows: dict[int, str],
+    row_number: int,
+    data: bytes,
+    suffix: str,
+) -> None:
+    df_index = row_number - 2
+    if 0 <= df_index < len(df.index):
+        student_id = clean_cell(df.iloc[df_index].get("学号", ""))
+    else:
+        student_id = ""
+    count = row_counts.get(row_number, 0) + 1
+    row_counts[row_number] = count
+    stem = safe_photo_stem(student_id, f"row_{row_number}")
+    filename = f"{stem}{suffix}" if count == 1 else f"{stem}_{count}{suffix}"
+    target = cache_dir / filename
+    target.write_bytes(data)
+    rows[row_number] = filename
 
 
 def find_photo(photos_dir: Path, student_id: str) -> Optional[Path]:
@@ -513,6 +658,9 @@ def upload_zip(
                 report["imported"].append(base)
                 ok, errors, warnings = validate_counselor_pair(activity_path, base)
                 report["warnings"].extend(warnings)
+                summary = photo_import_summary(activity_path / excel.name, base)
+                if summary:
+                    report["warnings"].append(summary)
                 if not ok:
                     report["errors"].extend(errors)
         finally:
@@ -554,6 +702,9 @@ def upload_excel(
         report["imported"].append(base)
         ok, errors, warnings = validate_counselor_pair(activity_path, base)
         report["warnings"].extend(warnings)
+        summary = photo_import_summary(target, base)
+        if summary:
+            report["warnings"].append(summary)
         if not ok:
             report["errors"].extend(errors)
     finally:
@@ -603,6 +754,12 @@ def import_data_package(zip_path: Path, overwrite: bool = True) -> dict[str, lis
             else:
                 rel_parts = parts
             if not rel_parts:
+                continue
+            if len(rel_parts) >= 2 and rel_parts[0] not in ROOT_RESOURCE_FILES:
+                rel_parts = (DEFAULT_ACTIVITY_NAME, *rel_parts[1:])
+            elif rel_parts == (CURRENT_ACTIVITY_FILE,):
+                write_json(root / CURRENT_ACTIVITY_FILE, {"activity": DEFAULT_ACTIVITY_NAME})
+                report["imported"].append(CURRENT_ACTIVITY_FILE)
                 continue
             target = root.joinpath(*rel_parts)
             if target.exists() and not overwrite:

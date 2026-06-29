@@ -378,7 +378,7 @@ class CounselorWindow(QMainWindow):
     def save_score(self) -> None:
         self.update_scores()
         data_manager.save_score(self.activity_path, self.counselor.id, self.scores)
-        QMessageBox.information(self, "已保存", "成绩已保存到当前活动的 scores.json。")
+        QMessageBox.information(self, "已保存", "成绩已保存到当前比赛的 scores.json。")
 
     def export_result(self) -> None:
         QMessageBox.information(self, "功能已调整", "当前版本使用单机双屏比赛流程，不再导出辅导员答题结果包。")

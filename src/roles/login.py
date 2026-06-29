@@ -58,10 +58,10 @@ class RoleDialog(QDialog):
 class ActivityDialog(QDialog):
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("选择活动")
+        self.setWindowTitle("比赛")
         self.activity_name: Optional[str] = None
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("请选择当前活动"))
+        layout.addWidget(QLabel("当前比赛"))
         self.combo = QComboBox()
         self.combo.addItems(data_manager.get_activities())
         layout.addWidget(self.combo)
@@ -74,7 +74,7 @@ class ActivityDialog(QDialog):
     def accept_activity(self) -> None:
         self.activity_name = self.combo.currentText()
         if not self.activity_name:
-            QMessageBox.warning(self, "无活动", "请先由管理员创建活动。")
+            QMessageBox.warning(self, "无比赛", "请先由管理员导入比赛资料。")
             return
         data_manager.set_current_activity(self.activity_name)
         self.accept()

@@ -74,8 +74,8 @@ class AdminWindow(QMainWindow):
         layout.addWidget(title)
 
         actions = (
-            ("活动详情", "导入资料并逐位辅导员进入答题。", self.open_default_activity),
-            ("比赛设置", "按活动设置题目、计时、抽题数量和答题字段。", self.show_settings),
+            ("比赛详情", "导入资料并逐位辅导员进入答题。", self.open_default_activity),
+            ("比赛设置", "设置题目、计时、抽题数量和答题字段。", self.show_settings),
             ("导入历史数据", "导入此前导出的完整历史数据 zip。", self.import_history_data),
             ("一键导出全部数据", "导出完整 resources 数据，便于换电脑恢复。", self.export_all_data),
         )
@@ -122,7 +122,7 @@ class AdminWindow(QMainWindow):
         top = QHBoxLayout()
         back = QPushButton("返回")
         back.clicked.connect(self.show_home)
-        self.activity_title = QLabel("活动详情")
+        self.activity_title = QLabel("比赛详情")
         self.activity_title.setObjectName("titleLabel")
         top.addWidget(back)
         top.addWidget(self.activity_title)
@@ -192,18 +192,13 @@ class AdminWindow(QMainWindow):
         self.stack.setCurrentWidget(self.settings_page)
 
     def open_default_activity(self) -> None:
-        activities = data_manager.get_activities()
-        if activities:
-            name = data_manager.get_current_activity() or activities[0]
-        else:
-            name = data_manager.create_activity("默认活动").name
-        self.select_activity(name)
+        self.select_activity(data_manager.get_current_activity() or data_manager.DEFAULT_ACTIVITY_NAME)
 
     def select_activity(self, name: str) -> None:
         self.current_activity = name
         data_manager.set_current_activity(name)
         self.activity_path = data_manager.activity_path(name)
-        self.activity_title.setText(f"活动详情：{name}")
+        self.activity_title.setText(f"比赛详情：{name}")
         self.current_page = 0
         self.refresh_counselors()
         self.stack.setCurrentWidget(self.activity_page)
@@ -371,12 +366,12 @@ class AdminWindow(QMainWindow):
 
     def upload_zip(self) -> None:
         if not self.activity_path:
-            QMessageBox.warning(self, "未选择活动", "请先进入一个活动。")
+            QMessageBox.warning(self, "未进入比赛", "请先进入比赛详情。")
             return
         data_file, _ = QFileDialog.getOpenFileName(self, "选择资料文件", "", "Excel/Zip files (*.xlsx *.zip)")
         if not data_file:
             return
-        if QMessageBox.question(self, "确认覆盖", "上传新资料会删除当前活动下已导入的所有辅导员资料、答题次数和成绩，然后使用本次资料重新导入。是否继续？") != QMessageBox.Yes:
+        if QMessageBox.question(self, "确认覆盖", "上传新资料会删除当前比赛已导入的所有辅导员资料、答题次数和成绩，然后使用本次资料重新导入。是否继续？") != QMessageBox.Yes:
             return
         try:
             path = Path(data_file)
@@ -428,7 +423,7 @@ class AdminWindow(QMainWindow):
 
     def start_counselor_competition(self, counselor) -> None:
         if not self.activity_path:
-            QMessageBox.warning(self, "未选择活动", "请先进入一个活动。")
+            QMessageBox.warning(self, "未进入比赛", "请先进入比赛详情。")
             return
         self.competition_window = CompetitionControlWindow(
             self.activity_path,

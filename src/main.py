@@ -27,8 +27,6 @@ class AppController:
             return
         if QMessageBox.question(None, "导入历史数据", "是否先导入历史数据 zip？") == QMessageBox.Yes:
             self.import_data_package("导入历史数据")
-        if not data_manager.get_activities():
-            QMessageBox.information(None, "暂无活动", "resources 下暂无活动，请在管理员页面创建活动。")
         self.window = AdminWindow(logout_callback=self.logout, theme_callback=self.toggle_theme)
         self.window.show()
 
