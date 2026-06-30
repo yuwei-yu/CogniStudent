@@ -23,6 +23,7 @@ CONTEST_SETTINGS = "contest_settings.json"
 SCORES_FILE = "scores.json"
 ATTEMPTS_FILE = "contest_attempts.json"
 CURRENT_ACTIVITY_FILE = ".current_activity.json"
+BLACKLIST_SUFFIX = ".blacklist.json"
 DEFAULT_ACTIVITY_NAME = "比赛"
 ROOT_RESOURCE_FILES = {
     ADMIN_CONFIG,
@@ -219,6 +220,16 @@ def clean_cell(value: object) -> str:
     return "" if text.lower() in {"nan", "nat", "none"} else text
 
 
+def raw_cell_text(value: object) -> str:
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    text = str(value)
+    return "" if text.lower() in {"nan", "nat", "none"} else text
+
+
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     mapping: dict[str, str] = {}
     stripped_columns = {str(col).strip(): col for col in df.columns}
@@ -232,7 +243,73 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 def validate_excel_columns(excel_path: Path) -> list[str]:
     df = normalize_columns(read_excel(excel_path))
-    return [col for col in REQUIRED_COLUMNS if col not in df.columns]
+    return [] if "姓名" in df.columns else ["姓名"]
+
+
+def blacklist_path(excel_path: Path) -> Path:
+    return excel_path.with_name(f"{excel_path.stem}{BLACKLIST_SUFFIX}")
+
+
+def student_identity(student_id: str, name: str) -> str:
+    return f"{student_id}\t{name.strip()}"
+
+
+def has_trailing_name_space(value: str) -> bool:
+    return value.endswith((" ", "\u3000"))
+
+
+def read_blacklist(excel_path: Path) -> set[str]:
+    data = read_json(blacklist_path(excel_path), [])
+    if not isinstance(data, list):
+        return set()
+    entries: set[str] = set()
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        student_id = clean_cell(item.get("学号", ""))
+        name = clean_cell(item.get("姓名", ""))
+        entries.add(student_identity(student_id, name))
+    return entries
+
+
+def write_blacklist_file(excel_path: Path, rows: list[dict[str, str]]) -> None:
+    path = blacklist_path(excel_path)
+    if rows:
+        write_json(path, rows)
+    elif path.exists():
+        path.unlink()
+
+
+def generate_blacklist(excel_path: Path) -> list[dict[str, str]]:
+    df = normalize_columns(read_excel(excel_path))
+    if "姓名" not in df.columns:
+        write_blacklist_file(excel_path, [])
+        return []
+    rows: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for position, (_, row) in enumerate(df.iterrows()):
+        extra = {str(k): clean_cell(v) for k, v in row.items()}
+        if not any(extra.values()):
+            continue
+        raw_name = raw_cell_text(row.get("姓名", ""))
+        if not raw_name or not has_trailing_name_space(raw_name):
+            continue
+        student_id = clean_cell(row.get("学号", ""))
+        name = clean_cell(raw_name)
+        identity = student_identity(student_id, name)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        rows.append(
+            {
+                "Excel行号": str(position + 2),
+                "学号": student_id,
+                "姓名": name,
+                "原因": "学生姓名以空格结尾",
+            }
+        )
+    write_blacklist_file(excel_path, rows)
+    return rows
 
 
 def photo_cache_path(excel_path: Path) -> Path:
@@ -618,17 +695,24 @@ def find_photo(photos_dir: Path, student_id: str) -> Optional[Path]:
     return None
 
 
-def load_students(excel_path: Path, photos_dir: Optional[Path] = None) -> list[Student]:
+def load_students(
+    excel_path: Path,
+    photos_dir: Optional[Path] = None,
+    include_blacklisted: bool = False,
+) -> list[Student]:
     df = normalize_columns(read_excel(excel_path))
     photos_by_row = extract_excel_photos(excel_path, df)
     students: list[Student] = []
     counselor_id = excel_path.stem
+    blacklist = set() if include_blacklisted else read_blacklist(excel_path)
     for position, (_, row) in enumerate(df.iterrows()):
         extra = {str(k): clean_cell(v) for k, v in row.items()}
         if not any(extra.values()):
             continue
         student_id = clean_cell(row.get("学号", ""))
         name = clean_cell(row.get("姓名", ""))
+        if student_identity(student_id, name) in blacklist:
+            continue
         excel_row = position + 2
         photo_path = photos_by_row.get(excel_row)
         if photo_path is None and photos_dir is not None:
@@ -664,6 +748,29 @@ def load_all_students_for_judge(activity_path: Path, counselor_id_list: Iterable
     return result
 
 
+def missing_photo_rows(excel_path: Path, photos_dir: Optional[Path] = None) -> list[int]:
+    df = normalize_columns(read_excel(excel_path))
+    photos_by_row = extract_excel_photos(excel_path, df)
+    blacklist = read_blacklist(excel_path)
+    rows: list[int] = []
+    for position, (_, row) in enumerate(df.iterrows()):
+        extra = {str(k): clean_cell(v) for k, v in row.items()}
+        if not any(extra.values()):
+            continue
+        student_id = clean_cell(row.get("学号", ""))
+        name = clean_cell(row.get("姓名", ""))
+        if not student_id or student_identity(student_id, name) in blacklist:
+            continue
+        excel_row = position + 2
+        if photos_by_row.get(excel_row) is None and (photos_dir is None or find_photo(photos_dir, student_id) is None):
+            rows.append(excel_row)
+    return rows
+
+
+def format_row_numbers(rows: list[int]) -> str:
+    return "、".join(str(row) for row in rows)
+
+
 def validate_counselor_pair(activity_path: Path, base_name: str) -> tuple[bool, list[str], list[str]]:
     excel = activity_path / f"{base_name}.xls"
     if not excel.exists():
@@ -676,10 +783,11 @@ def validate_counselor_pair(activity_path: Path, base_name: str) -> tuple[bool, 
         return False, errors, warnings
     missing_columns = validate_excel_columns(excel)
     if missing_columns:
-        errors.append(f"{base_name} Excel 缺少列：{', '.join(missing_columns)}")
-    for student in load_students(excel, photos_dir):
-        if student.student_id and student.photo_path is None:
-            warnings.append(f"{base_name} 学号 {student.student_id} 缺少照片")
+        errors.append(f"{excel.name}：缺少列 {', '.join(missing_columns)}")
+    generate_blacklist(excel)
+    photo_rows = missing_photo_rows(excel, photos_dir)
+    if photo_rows:
+        warnings.append(f"{excel.name}：缺少照片，涉及行 {format_row_numbers(photo_rows)}（共 {len(photo_rows)} 行）")
     return not errors, errors, warnings
 
 
@@ -717,6 +825,8 @@ def is_safe_zip_member(member: str) -> bool:
 def clear_activity_counselor_data(activity_path: Path) -> None:
     for excel in list(activity_path.glob("*.xls")) + list(activity_path.glob("*.xlsx")):
         excel.unlink()
+    for blacklist in activity_path.glob(f"*{BLACKLIST_SUFFIX}"):
+        blacklist.unlink()
     for path in activity_path.iterdir():
         if path.is_dir() and not path.name.startswith("."):
             shutil.rmtree(path)
@@ -792,6 +902,9 @@ def upload_zip(
                         continue
                     if (activity_path / excel.name).exists():
                         (activity_path / excel.name).unlink()
+                    old_blacklist = activity_path / f"{base}{BLACKLIST_SUFFIX}"
+                    if old_blacklist.exists():
+                        old_blacklist.unlink()
                     if (activity_path / base).exists():
                         shutil.rmtree(activity_path / base)
                 shutil.move(str(excel), str(activity_path / excel.name))
@@ -799,9 +912,6 @@ def upload_zip(
                     shutil.move(str(folder), str(activity_path / base))
                 report["imported"].append(base)
                 ok, errors, warnings = validate_counselor_pair(activity_path, base)
-                summary = photo_import_summary(activity_path / excel.name, base)
-                if summary:
-                    report["warnings"].append(summary)
                 report["warnings"].extend(warnings)
                 if not ok:
                     report["errors"].extend(errors)
@@ -839,13 +949,13 @@ def upload_excel(
             report["skipped"].append(base)
             return report
         target.unlink()
+        old_blacklist = activity_path / f"{base}{BLACKLIST_SUFFIX}"
+        if old_blacklist.exists():
+            old_blacklist.unlink()
     try:
         copy_file(excel_path, target)
         report["imported"].append(base)
         ok, errors, warnings = validate_counselor_pair(activity_path, base)
-        summary = photo_import_summary(target, base)
-        if summary:
-            report["warnings"].append(summary)
         report["warnings"].extend(warnings)
         if not ok:
             report["errors"].extend(errors)

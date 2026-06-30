@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 
 from game import data_manager
 from utils import theme
+from utils.logo import logo_label
 
 
 class RoleDialog(QDialog):
@@ -29,6 +30,7 @@ class RoleDialog(QDialog):
         self.selected_role: Optional[str] = None
         self.theme_callback = theme_callback
         layout = QVBoxLayout(self)
+        layout.addWidget(logo_label(82), alignment=Qt.AlignCenter)
         title = QLabel("辅导员辨识学生系统")
         title.setAlignment(Qt.AlignCenter)
         title.setObjectName("titleLabel")
@@ -86,6 +88,13 @@ class AdminLoginDialog(QDialog):
         self.setWindowTitle("管理员登录")
         self.theme_callback = theme_callback
         layout = QFormLayout(self)
+        logo_row = QWidget()
+        logo_layout = QHBoxLayout(logo_row)
+        logo_layout.setContentsMargins(0, 0, 0, 0)
+        logo_layout.addStretch(1)
+        logo_layout.addWidget(logo_label(78), alignment=Qt.AlignCenter)
+        logo_layout.addStretch(1)
+        layout.addRow(logo_row)
         self.username = QLineEdit("admin")
         self.password = QLineEdit()
         self.password.setEchoMode(QLineEdit.Password)

@@ -32,6 +32,7 @@ from game import data_manager
 from game.rounds import INFO_KEYS, build_locate_questions, build_mixed_round, build_needle_round, format_student_answer
 from game.scorer import score_locate, score_student_fields, total_score
 from utils import theme
+from utils.logo import logo_label
 
 
 class PhotoLabel(QLabel):
@@ -93,6 +94,7 @@ class CounselorWindow(QMainWindow):
         top = QHBoxLayout()
         title = QLabel(f"{activity_path.name} / {counselor.base_name}")
         title.setObjectName("titleLabel")
+        top.addWidget(logo_label(46))
         top.addWidget(title)
         top.addStretch(1)
         top.addWidget(self.training)
@@ -326,7 +328,11 @@ class CounselorWindow(QMainWindow):
                 child = self.locate_layout.takeAt(0)
                 if child.widget():
                     child.widget().deleteLater()
-            self.locate_questions = build_locate_questions(self.students, count=int(self.settings["locate_question_count"]))
+            self.locate_questions = build_locate_questions(
+                self.students,
+                count=int(self.settings["locate_question_count"]),
+                clue_fields=self.answer_fields,
+            )
             self.locate_inputs = []
             for index, question in enumerate(self.locate_questions, start=1):
                 group = QGroupBox(f"描述定位 {index}")

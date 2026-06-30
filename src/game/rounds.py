@@ -66,18 +66,30 @@ def build_mixed_round(
     return MixedRound(own_students=own, distractors=distractors, duration_seconds=duration_seconds)
 
 
-def build_locate_questions(students: list[Student], count: int = 2) -> list[LocateQuestion]:
+def build_locate_questions(
+    students: list[Student],
+    count: int = 2,
+    clue_fields: Optional[list[str]] = None,
+) -> list[LocateQuestion]:
     selected = random.sample(students, min(count, len(students)))
     questions: list[LocateQuestion] = []
     for student in selected:
-        fields = {
-            "专业": student.major,
-            "经济状况": student.financial_status,
-            "学习情况": student.failed_courses,
-            "奖惩情况": student.awards,
-            "家庭住址": student.hometown,
-            "宿舍号": student.dormitory,
-        }
+        if clue_fields is None:
+            fields = {
+                "专业": student.major,
+                "经济状况": student.financial_status,
+                "学习情况": student.failed_courses,
+                "奖惩情况": student.awards,
+                "家庭住址": student.hometown,
+                "宿舍号": student.dormitory,
+            }
+        else:
+            values = student.answer_fields()
+            fields = {
+                field: student_field_value(student, field, values)
+                for field in clue_fields
+                if field not in {"姓名", "学号"}
+            }
         questions.append(LocateQuestion(answer=student, clues=fields))
     return questions
 

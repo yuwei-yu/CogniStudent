@@ -31,6 +31,7 @@ from game import data_manager
 from game.rounds import INFO_KEYS, build_locate_questions, build_mixed_round, build_needle_round, format_student_answer
 from game.scorer import total_score
 from utils import theme
+from utils.logo import logo_label
 
 
 class JudgeWindow(QMainWindow):
@@ -62,6 +63,7 @@ class JudgeWindow(QMainWindow):
         title = QLabel(f"比赛管理：{activity_path.name}")
         title.setObjectName("titleLabel")
         self.timer_label = QLabel("计时器未启动")
+        top.addWidget(logo_label(46))
         top.addWidget(title)
         top.addStretch(1)
         top.addWidget(self.timer_label)
@@ -171,6 +173,7 @@ class JudgeWindow(QMainWindow):
         if row < 0 or row >= len(self.counselors):
             return
         self.current = self.counselors[row]
+        self.answer_fields = list(self.settings["answer_fields"])
         self.current_students = data_manager.load_students(self.current.excel_path, self.current.photos_dir)
         existing = data_manager.load_scores(self.activity_path).get(self.current.id, {})
         self.scores = {key: float(value) for key, value in existing.items() if isinstance(value, (int, float))}
@@ -241,7 +244,11 @@ class JudgeWindow(QMainWindow):
                 self.answer_text.setPlainText("\n\n".join(chunks))
                 self.start_timer(round_data.duration_seconds)
             else:
-                questions = build_locate_questions(self.current_students, count=int(self.settings["locate_question_count"]))
+                questions = build_locate_questions(
+                    self.current_students,
+                    count=int(self.settings["locate_question_count"]),
+                    clue_fields=self.answer_fields,
+                )
                 chunks = []
                 for index, question in enumerate(questions, start=1):
                     clues = "\n".join(f"{key}：{value or '未填写'}" for key, value in question.clues.items())

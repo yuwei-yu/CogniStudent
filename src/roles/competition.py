@@ -27,6 +27,7 @@ from game.rounds import (
     build_needle_round,
     student_field_value,
 )
+from utils.logo import logo_label
 
 PHOTO_HEIGHT_RATIO = 4 / 3
 
@@ -41,7 +42,11 @@ class JudgeDisplayWindow(QMainWindow):
         self.browser.setOpenExternalLinks(False)
         central = QWidget()
         layout = QVBoxLayout(central)
-        layout.addWidget(self.title_label)
+        header = QHBoxLayout()
+        header.addWidget(logo_label(48))
+        header.addWidget(self.title_label)
+        header.addStretch(1)
+        layout.addLayout(header)
         layout.addWidget(self.browser)
         self.setCentralWidget(central)
         self.resize(1000, 700)
@@ -49,7 +54,7 @@ class JudgeDisplayWindow(QMainWindow):
     def set_content(self, title: str, body: str) -> None:
         self.title_label.setText(title)
         self.browser.setHtml(
-            build_html_document(body, image_width=88, font_size=20, judge=True)
+            build_html_document(body, image_width=88, font_size=23, judge=True)
         )
 
     def set_title(self, title: str) -> None:
@@ -122,6 +127,7 @@ class CompetitionControlWindow(QMainWindow):
             "border-radius: 8px; padding: 10px 18px;"
             "}"
         )
+        top.addWidget(logo_label(46))
         top.addWidget(self.title)
         top.addStretch(1)
         top.addWidget(self.timer_label)
@@ -285,7 +291,9 @@ class CompetitionControlWindow(QMainWindow):
                 self.judge_html = self.judge_body_builder(self.judge_columns())
             else:
                 questions = build_locate_questions(
-                    self.students, count=int(self.settings["locate_question_count"])
+                    self.students,
+                    count=int(self.settings["locate_question_count"]),
+                    clue_fields=self.answer_fields,
                 )
                 self.locate_questions = questions
                 self.locate_index = 0
@@ -561,7 +569,7 @@ class CompetitionControlWindow(QMainWindow):
         self, students: list[Student], judge: bool = False, columns: Optional[int] = None
     ) -> str:
         columns = 3 if judge else (columns or self.answer_columns())
-        image_width = 112 if judge else 96
+        image_width = 96 if judge else 96
         card_class = "answer-card judge-answer-card" if judge else "answer-card"
         spacing = "0" if judge else "14"
         cards = [
@@ -612,7 +620,7 @@ class CompetitionControlWindow(QMainWindow):
         for student in students:
             rows.append(
                 "<td class='judge-student-photo-cell'>"
-                f"{self.image_tag(student, image_width=118)}"
+                f"{self.image_tag(student, image_width=102)}"
                 "</td>"
             )
         rows.append("</tr>")
@@ -739,7 +747,7 @@ class CompetitionControlWindow(QMainWindow):
             "<table class='locate-detail-card' width='100%' cellspacing='0' cellpadding='0'>"
             "<tr>"
             "<td class='locate-detail-photo' valign='middle'>"
-            f"{self.image_tag(student, image_width=250)}"
+            f"{self.image_tag(student, image_width=220)}"
             "</td>"
             "<td class='locate-detail-info' valign='top'>"
             "<div class='locate-detail-head'>"
@@ -775,7 +783,7 @@ class CompetitionControlWindow(QMainWindow):
                 f"<span class='locate-card-name'>{escape(student.name)}</span>"
                 "</td></tr>"
                 "<tr><td class='locate-card-photo'>"
-                f"{self.image_tag(student, image_width=150)}"
+                f"{self.image_tag(student, image_width=130)}"
                 "</td></tr>"
                 "</table>"
                 "</td>"
@@ -811,7 +819,7 @@ def build_html_document(
 ) -> str:
     if not judge:
         image_width = min(image_width, 96)
-    answer_image_width = 112 if judge else max(84, min(96, image_width))
+    answer_image_width = 96 if judge else max(84, min(96, image_width))
     answer_image_height = int(answer_image_width * PHOTO_HEIGHT_RATIO)
     body_margin = 16 if judge else 26
     answer_font_size = max(17, font_size - 1) if judge else max(18, font_size - 1)

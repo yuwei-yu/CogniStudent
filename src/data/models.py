@@ -24,7 +24,7 @@ class Student:
     extra: dict[str, str] = field(default_factory=dict)
 
     def answer_fields(self) -> dict[str, str]:
-        return {
+        values = {
             "姓名": self.name,
             "专业": self.major,
             "政治面貌": self.political_status,
@@ -37,6 +37,10 @@ class Student:
             "不及格科目": self.failed_courses,
             "奖惩情况": self.awards,
         }
+        for key, value in self.extra.items():
+            if key not in values:
+                values[key] = value
+        return values
 
 
 @dataclass

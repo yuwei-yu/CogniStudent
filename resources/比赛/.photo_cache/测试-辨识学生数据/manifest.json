@@ -1,0 +1,16 @@
+{
+  "photo_cache_version": 3,
+  "excel": "测试-辨识学生数据.xlsx",
+  "mtime_ns": 1782798368187542911,
+  "size": 63477,
+  "rows": {
+    "2": "1200910001.jpeg",
+    "3": "1220910001.jpeg",
+    "4": "1220910003.jpeg",
+    "5": "1220910006.jpeg"
+  },
+  "photo_strategy": "anchor",
+  "photo_source": "openpyxl",
+  "photo_count": 4,
+  "student_row_count": 4
+}

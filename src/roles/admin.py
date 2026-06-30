@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
 from game import data_manager
 from roles.competition import CompetitionControlWindow
 from utils import theme
+from utils.logo import logo_label
 
 
 class AdminWindow(QMainWindow):
@@ -69,6 +70,7 @@ class AdminWindow(QMainWindow):
     def build_home_page(self) -> QWidget:
         content = QWidget()
         layout = QVBoxLayout(content)
+        layout.addWidget(logo_label(88), alignment=Qt.AlignHCenter)
         title = QLabel("管理员工作台")
         title.setObjectName("titleLabel")
         layout.addWidget(title)
@@ -107,6 +109,7 @@ class AdminWindow(QMainWindow):
         title = QLabel("全局比赛设置")
         title.setObjectName("titleLabel")
         top.addWidget(back)
+        top.addWidget(logo_label(42))
         top.addWidget(title)
         top.addStretch(1)
         layout.addLayout(top)
@@ -125,6 +128,7 @@ class AdminWindow(QMainWindow):
         self.activity_title = QLabel("比赛详情")
         self.activity_title.setObjectName("titleLabel")
         top.addWidget(back)
+        top.addWidget(logo_label(42))
         top.addWidget(self.activity_title)
         top.addStretch(1)
         self.contest_count_label = QLabel("已答题：0 / 0")
@@ -275,7 +279,15 @@ class AdminWindow(QMainWindow):
 
     def student_count_text(self, counselor) -> str:
         try:
-            return str(len(data_manager.load_students(counselor.excel_path, counselor.photos_dir)))
+            return str(
+                len(
+                    data_manager.load_students(
+                        counselor.excel_path,
+                        counselor.photos_dir,
+                        include_blacklisted=True,
+                    )
+                )
+            )
         except Exception as exc:
             return f"读取失败：{exc}"
 
