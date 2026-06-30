@@ -99,8 +99,9 @@ COLUMN_ALIASES = {
 CURRENT_ACTIVITY: Optional[str] = None
 BOOTSTRAPPED = False
 PHOTO_CACHE_DIR = ".photo_cache"
-PHOTO_CACHE_VERSION = 3
+PHOTO_CACHE_VERSION = 9
 PHOTO_SUFFIXES = (".jpg", ".jpeg", ".png", ".JPG", ".JPEG", ".PNG")
+PHOTO_COLUMN_ALIASES = {"照片", "图片", "学生照片", "头像", "相片", "电子照片"}
 NS_DRAWING = {
     "a": "http://schemas.openxmlformats.org/drawingml/2006/main",
     "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
@@ -225,10 +226,23 @@ def authenticate_counselor(
     return None
 
 
-def read_excel(excel_path: Path) -> pd.DataFrame:
+def read_excel_raw(excel_path: Path) -> pd.DataFrame:
     if excel_path.suffix.lower() == ".xls":
-        return pd.read_excel(excel_path, engine="xlrd", dtype=str).fillna("")
-    return pd.read_excel(excel_path, engine="openpyxl", dtype=str).fillna("")
+        return pd.read_excel(excel_path, engine="xlrd", dtype=str, header=None).fillna("")
+    return pd.read_excel(excel_path, engine="openpyxl", dtype=str, header=None).fillna("")
+
+
+def read_excel(excel_path: Path) -> pd.DataFrame:
+    raw = read_excel_raw(excel_path)
+    if raw.empty:
+        return raw
+    header_index = detect_header_row(raw)
+    columns = unique_column_names([clean_cell(value) for value in raw.iloc[header_index].tolist()])
+    df = raw.iloc[header_index + 1 :].copy().reset_index(drop=True)
+    df.columns = columns
+    df.attrs["header_row"] = header_index + 1
+    df.attrs["excel_rows"] = [header_index + 2 + index for index in range(len(df.index))]
+    return df.fillna("")
 
 
 def clean_cell(value: object) -> str:
@@ -249,6 +263,62 @@ def raw_cell_text(value: object) -> str:
         pass
     text = str(value)
     return "" if text.lower() in {"nan", "nat", "none"} else text
+
+
+def detect_header_row(raw: pd.DataFrame) -> int:
+    best_index = 0
+    best_score = -1
+    for index, row in raw.iterrows():
+        values = [clean_cell(value) for value in row.tolist()]
+        if not any(values):
+            continue
+        matched: set[str] = set()
+        for value in values:
+            for canonical, aliases in COLUMN_ALIASES.items():
+                if value in aliases:
+                    matched.add(canonical)
+                    break
+            if value in PHOTO_COLUMN_ALIASES:
+                matched.add("照片")
+        score = len(matched) * 2 + (3 if "姓名" in matched else 0) + (2 if "学号" in matched else 0)
+        if score > best_score:
+            best_index = int(index)
+            best_score = score
+    return best_index
+
+
+def unique_column_names(columns: list[str]) -> list[str]:
+    counts: dict[str, int] = {}
+    result: list[str] = []
+    for index, column in enumerate(columns, start=1):
+        base = column or f"未命名列{index}"
+        count = counts.get(base, 0) + 1
+        counts[base] = count
+        result.append(base if count == 1 else f"{base}.{count}")
+    return result
+
+
+def dataframe_excel_row(df: pd.DataFrame, position: int) -> int:
+    rows = df.attrs.get("excel_rows", [])
+    if isinstance(rows, list) and 0 <= position < len(rows):
+        try:
+            return int(rows[position])
+        except (TypeError, ValueError):
+            pass
+    header_row = int(df.attrs.get("header_row", 1) or 1)
+    return header_row + 1 + position
+
+
+def dataframe_position_for_excel_row(df: pd.DataFrame, excel_row: int) -> Optional[int]:
+    rows = df.attrs.get("excel_rows", [])
+    if isinstance(rows, list):
+        try:
+            return rows.index(excel_row)
+        except ValueError:
+            return None
+    header_row = int(df.attrs.get("header_row", 1) or 1)
+    position = excel_row - header_row - 1
+    return position if 0 <= position < len(df.index) else None
 
 
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -328,7 +398,7 @@ def generate_blacklist(excel_path: Path) -> list[dict[str, str]]:
         seen.add(identity)
         rows.append(
             {
-                "Excel行号": str(position + 2),
+                "Excel行号": str(dataframe_excel_row(df, position)),
                 "学号": student_id,
                 "姓名": name,
             }
@@ -378,6 +448,14 @@ def image_anchor_row(image) -> Optional[int]:
     return int(row) + 1
 
 
+def image_anchor_col(image) -> Optional[int]:
+    marker = image_anchor_marker(image, "_from")
+    col = getattr(marker, "col", None)
+    if col is None:
+        return None
+    return int(col) + 1
+
+
 def image_anchor_row_center(image) -> Optional[float]:
     start = image_anchor_marker(image, "_from")
     end = image_anchor_marker(image, "to")
@@ -396,19 +474,64 @@ def image_anchor_row_center(image) -> Optional[float]:
     return ((start_pos + end_pos) / 2) + 1
 
 
+def image_anchor_col_center(image) -> Optional[float]:
+    start = image_anchor_marker(image, "_from")
+    end = image_anchor_marker(image, "to")
+    start_col = getattr(start, "col", None)
+    if start_col is None:
+        return None
+    end_col = getattr(end, "col", None)
+    if end_col is None:
+        return float(int(start_col) + 1)
+    start_offset = getattr(start, "colOff", 0) or 0
+    end_offset = getattr(end, "colOff", 0) or 0
+    start_pos = int(start_col) + float(start_offset) / 9_525_000
+    end_pos = int(end_col) + float(end_offset) / 9_525_000
+    return ((start_pos + end_pos) / 2) + 1
+
+
 def student_excel_rows(df: pd.DataFrame) -> set[int]:
     rows: set[int] = set()
     for position, (_, row) in enumerate(df.iterrows()):
         extra = {str(k): clean_cell(v) for k, v in row.items()}
         if any(extra.values()):
-            rows.add(position + 2)
+            rows.add(dataframe_excel_row(df, position))
     return rows
+
+
+def student_photo_slots(df: pd.DataFrame) -> list[dict[str, object]]:
+    slots: list[dict[str, object]] = []
+    for position, (_, row) in enumerate(df.iterrows()):
+        extra = {str(k): clean_cell(v) for k, v in row.items()}
+        slots.append(
+            {
+                "excel_row": dataframe_excel_row(df, position),
+                "student_id": clean_cell(row.get("学号", "")),
+                "has_student": any(extra.values()),
+            }
+        )
+    return slots
+
+
+def photo_excel_columns(df: pd.DataFrame) -> set[int]:
+    columns: set[int] = set()
+    for index, column in enumerate(df.columns, start=1):
+        if str(column).strip() in PHOTO_COLUMN_ALIASES:
+            columns.add(index)
+    return columns
 
 
 def nearest_student_row(center: Optional[float], valid_rows: set[int]) -> Optional[int]:
     if center is None or not valid_rows:
         return None
     nearest = min(valid_rows, key=lambda row: abs(row - center))
+    return nearest if abs(nearest - center) <= 1.25 else None
+
+
+def nearest_photo_column(center: Optional[float], valid_columns: set[int]) -> Optional[int]:
+    if center is None or not valid_columns:
+        return None
+    nearest = min(valid_columns, key=lambda column: abs(column - center))
     return nearest if abs(nearest - center) <= 1.25 else None
 
 
@@ -461,32 +584,53 @@ def worksheet_part_path(zf: zipfile.ZipFile, worksheet) -> str:
     return worksheet_parts[0] if worksheet_parts else ""
 
 
-def drawing_anchor_center(anchor) -> tuple[Optional[int], Optional[float]]:
+def drawing_anchor_position(
+    anchor,
+) -> tuple[Optional[int], Optional[float], Optional[int], Optional[float]]:
     marker = anchor.find("xdr:from", NS_DRAWING)
     if marker is None:
-        return None, None
+        return None, None, None, None
     row_text = marker.findtext("xdr:row", namespaces=NS_DRAWING)
-    if row_text is None:
-        return None, None
+    col_text = marker.findtext("xdr:col", namespaces=NS_DRAWING)
+    if row_text is None or col_text is None:
+        return None, None, None, None
     start_row = int(row_text)
+    start_col = int(col_text)
     start_offset_text = marker.findtext(
         "xdr:rowOff", default="0", namespaces=NS_DRAWING
     )
+    start_col_offset_text = marker.findtext(
+        "xdr:colOff", default="0", namespaces=NS_DRAWING
+    )
     start_offset = int(start_offset_text or 0)
+    start_col_offset = int(start_col_offset_text or 0)
     end_marker = anchor.find("xdr:to", NS_DRAWING)
     if end_marker is None:
-        return start_row + 1, float(start_row + 1)
+        return start_row + 1, float(start_row + 1), start_col + 1, float(start_col + 1)
     end_row_text = end_marker.findtext("xdr:row", namespaces=NS_DRAWING)
-    if end_row_text is None:
-        return start_row + 1, float(start_row + 1)
+    end_col_text = end_marker.findtext("xdr:col", namespaces=NS_DRAWING)
+    if end_row_text is None or end_col_text is None:
+        return start_row + 1, float(start_row + 1), start_col + 1, float(start_col + 1)
     end_row = int(end_row_text)
+    end_col = int(end_col_text)
     end_offset_text = end_marker.findtext(
         "xdr:rowOff", default="0", namespaces=NS_DRAWING
     )
+    end_col_offset_text = end_marker.findtext(
+        "xdr:colOff", default="0", namespaces=NS_DRAWING
+    )
     end_offset = int(end_offset_text or 0)
+    end_col_offset = int(end_col_offset_text or 0)
     start_pos = start_row + float(start_offset) / 9_525_000
     end_pos = end_row + float(end_offset) / 9_525_000
-    return start_row + 1, ((start_pos + end_pos) / 2) + 1
+    start_col_pos = start_col + float(start_col_offset) / 9_525_000
+    end_col_pos = end_col + float(end_col_offset) / 9_525_000
+    return (
+        start_row + 1,
+        ((start_pos + end_pos) / 2) + 1,
+        start_col + 1,
+        ((start_col_pos + end_col_pos) / 2) + 1,
+    )
 
 
 def raw_xlsx_image_items(excel_path: Path, worksheet) -> list[dict]:
@@ -524,7 +668,7 @@ def raw_xlsx_image_items(excel_path: Path, worksheet) -> list[dict]:
                 data = zf.read(media_part)
                 if not data:
                     continue
-                anchor_row, center = drawing_anchor_center(anchor)
+                anchor_row, center, anchor_col, col_center = drawing_anchor_position(anchor)
                 suffix = Path(media_part).suffix.lower() or image_data_extension(data)
                 order_key = int((center or anchor_row or order) * 1000) + order
                 items.append(
@@ -532,6 +676,8 @@ def raw_xlsx_image_items(excel_path: Path, worksheet) -> list[dict]:
                         "order": order_key,
                         "center": center,
                         "anchor_row": anchor_row,
+                        "col_center": col_center,
+                        "anchor_col": anchor_col,
                         "data": data,
                         "suffix": suffix,
                     }
@@ -579,7 +725,12 @@ def load_cached_excel_photos(excel_path: Path) -> Optional[dict[int, Path]]:
 
 def photo_cache_manifest(excel_path: Path) -> dict:
     data = read_json(photo_cache_path(excel_path) / "manifest.json", {})
-    return data if isinstance(data, dict) else {}
+    if not isinstance(data, dict):
+        return {}
+    current = cache_marker(excel_path)
+    if any(data.get(key) != value for key, value in current.items()):
+        return {}
+    return data
 
 
 def photo_import_summary(excel_path: Path, base_name: str) -> Optional[str]:
@@ -593,7 +744,12 @@ def photo_import_summary(excel_path: Path, base_name: str) -> Optional[str]:
     photo_count = data.get("photo_count", "?")
     student_row_count = data.get("student_row_count", "?")
     photo_source = data.get("photo_source", "")
-    labels = {"anchor": "锚点匹配", "order": "顺序匹配"}
+    labels = {
+        "anchor": "锚点匹配",
+        "photo_column_anchor": "照片列锚点匹配",
+        "order": "顺序匹配",
+        "student_index": "学生列表编号匹配",
+    }
     label = labels.get(str(strategy), str(strategy) or "未知策略")
     source_labels = {"openpyxl": "常规读取", "raw": "底层解包"}
     source_label = source_labels.get(str(photo_source), str(photo_source) or "未知来源")
@@ -616,6 +772,7 @@ def extract_excel_photos(excel_path: Path, df: pd.DataFrame) -> dict[int, Path]:
     try:
         worksheet = workbook.active
         valid_rows = student_excel_rows(df)
+        valid_photo_columns = photo_excel_columns(df)
         openpyxl_items = []
         for image in sorted(worksheet._images, key=image_sort_key):
             try:
@@ -629,18 +786,23 @@ def extract_excel_photos(excel_path: Path, df: pd.DataFrame) -> dict[int, Path]:
                     "order": image_sort_key(image),
                     "center": image_anchor_row_center(image),
                     "anchor_row": image_anchor_row(image),
+                    "col_center": image_anchor_col_center(image),
+                    "anchor_col": image_anchor_col(image),
                     "data": data,
                     "suffix": image_extension(image, data),
                 }
             )
         raw_items = raw_xlsx_image_items(excel_path, worksheet)
-        if len(raw_items) > len(openpyxl_items):
-            image_items = raw_items
-            photo_source = "raw"
-        else:
-            image_items = openpyxl_items
-            photo_source = "openpyxl"
-        photo_rows, photo_strategy = best_photo_rows(image_items, valid_rows)
+        candidates = []
+        for source, items in (("openpyxl", openpyxl_items), ("raw", raw_items)):
+            candidate_rows, candidate_strategy = best_photo_rows(
+                items, df, valid_photo_columns
+            )
+            candidates.append((source, items, candidate_rows, candidate_strategy))
+        photo_source, image_items, photo_rows, photo_strategy = max(
+            candidates,
+            key=lambda item: (*photo_match_score(item[2], valid_rows), len(item[1])),
+        )
         rows = write_photo_rows(cache_dir, df, photo_rows)
     finally:
         workbook.close()
@@ -651,20 +813,22 @@ def extract_excel_photos(excel_path: Path, df: pd.DataFrame) -> dict[int, Path]:
     manifest["photo_source"] = photo_source
     manifest["photo_count"] = len(image_items)
     manifest["student_row_count"] = len(valid_rows)
+    manifest["student_slot_count"] = len(student_photo_slots(df))
+    manifest["photo_column_count"] = len(valid_photo_columns)
     write_json(cache_dir / "manifest.json", manifest)
     return {int(row): cache_dir / filename for row, filename in rows.items()}
 
 
 def best_photo_rows(
-    image_items: list[dict], valid_rows: set[int]
+    image_items: list[dict],
+    df: pd.DataFrame,
+    valid_photo_columns: set[int],
 ) -> tuple[dict[int, tuple[bytes, str]], str]:
-    anchor_rows = match_photos_by_anchor(image_items, valid_rows)
-    order_rows = match_photos_by_order(image_items, valid_rows)
-    if photo_match_score(order_rows, valid_rows) > photo_match_score(
-        anchor_rows, valid_rows
-    ):
-        return order_rows, "order"
-    return anchor_rows, "anchor"
+    scoped_items = filter_photo_column_items(image_items, valid_photo_columns)
+    indexed_rows = match_photos_by_student_index(scoped_items, df)
+    if indexed_rows or scoped_items:
+        return indexed_rows, "student_index"
+    return {}, "student_index"
 
 
 def photo_match_score(
@@ -673,11 +837,26 @@ def photo_match_score(
     return (len(set(rows) & valid_rows), -abs(len(rows) - len(valid_rows)))
 
 
+def filter_photo_column_items(
+    image_items: list[dict], valid_photo_columns: set[int]
+) -> list[dict]:
+    if not valid_photo_columns:
+        return image_items
+    result = []
+    for item in image_items:
+        column = (
+            nearest_photo_column(item.get("col_center"), valid_photo_columns)
+            or item.get("anchor_col")
+        )
+        if column in valid_photo_columns:
+            result.append(item)
+    return result
+
+
 def match_photos_by_anchor(
     image_items: list[dict], valid_rows: set[int]
 ) -> dict[int, tuple[bytes, str]]:
     rows: dict[int, tuple[bytes, str]] = {}
-    pending: list[dict] = []
     for item in image_items:
         row_number = (
             nearest_student_row(item["center"], valid_rows) or item["anchor_row"]
@@ -688,23 +867,62 @@ def match_photos_by_anchor(
             or row_number not in valid_rows
             or row_number in rows
         ):
-            pending.append(item)
+            continue
+        rows[row_number] = (item["data"], item["suffix"])
+    return rows
+
+
+def image_item_excel_row(item: dict, slot_rows: set[int]) -> Optional[int]:
+    anchor_row = item.get("anchor_row")
+    if isinstance(anchor_row, int) and anchor_row in slot_rows:
+        return anchor_row
+    center = item.get("center")
+    if isinstance(center, (float, int)):
+        row_number = int(center)
+        if row_number in slot_rows:
+            return row_number
+    return None
+
+
+def match_photos_by_student_index(
+    image_items: list[dict], df: pd.DataFrame
+) -> dict[int, tuple[bytes, str]]:
+    rows: dict[int, tuple[bytes, str]] = {}
+    slots = student_photo_slots(df)
+    if not slots:
+        return rows
+
+    slot_by_row = {int(slot["excel_row"]): slot for slot in slots}
+    slot_rows = set(slot_by_row)
+    sorted_items = sorted(image_items, key=lambda value: value["order"])
+    unresolved_items: list[dict] = []
+    for item in sorted_items:
+        row_number = image_item_excel_row(item, slot_rows)
+        if row_number is None:
+            unresolved_items.append(item)
+            continue
+        slot = slot_by_row[row_number]
+        if not slot["has_student"] or row_number in rows:
             continue
         rows[row_number] = (item["data"], item["suffix"])
 
-    missing_rows = sorted(valid_rows - set(rows))
-    if pending and len(pending) == len(missing_rows):
-        for row_number, item in zip(
-            missing_rows, sorted(pending, key=lambda value: value["order"])
-        ):
-            rows[row_number] = (item["data"], item["suffix"])
+    if rows or not unresolved_items:
+        return rows
+
+    for slot, item in zip(slots, unresolved_items):
+        row_number = int(slot["excel_row"])
+        if not slot["has_student"] or row_number in rows:
+            continue
+        rows[row_number] = (item["data"], item["suffix"])
     return rows
 
 
 def match_photos_by_order(
-    image_items: list[dict], valid_rows: set[int]
+    image_items: list[dict], valid_rows: set[int], allow_partial: bool = True
 ) -> dict[int, tuple[bytes, str]]:
     rows: dict[int, tuple[bytes, str]] = {}
+    if not allow_partial and len(image_items) != len(valid_rows):
+        return rows
     sorted_items = sorted(image_items, key=lambda value: value["order"])
     for row_number, item in zip(sorted(valid_rows), sorted_items):
         rows[row_number] = (item["data"], item["suffix"])
@@ -732,8 +950,8 @@ def save_excel_photo(
     data: bytes,
     suffix: str,
 ) -> None:
-    df_index = row_number - 2
-    if 0 <= df_index < len(df.index):
+    df_index = dataframe_position_for_excel_row(df, row_number)
+    if df_index is not None and 0 <= df_index < len(df.index):
         student_id = clean_cell(df.iloc[df_index].get("学号", ""))
     else:
         student_id = ""
@@ -775,7 +993,7 @@ def load_students(
         name = clean_cell(row.get("姓名", ""))
         if student_identity(student_id, name) in blacklist:
             continue
-        excel_row = position + 2
+        excel_row = dataframe_excel_row(df, position)
         photo_path = photos_by_row.get(excel_row)
         if photo_path is None and photos_dir is not None:
             photo_path = find_photo(photos_dir, student_id)
@@ -817,17 +1035,15 @@ def missing_photo_rows(
 ) -> list[int]:
     df = normalize_columns(read_excel(excel_path))
     photos_by_row = extract_excel_photos(excel_path, df)
-    blacklist = read_blacklist(excel_path)
     rows: list[int] = []
     for position, (_, row) in enumerate(df.iterrows()):
         extra = {str(k): clean_cell(v) for k, v in row.items()}
         if not any(extra.values()):
             continue
         student_id = clean_cell(row.get("学号", ""))
-        name = clean_cell(row.get("姓名", ""))
-        if not student_id or student_identity(student_id, name) in blacklist:
+        if not student_id:
             continue
-        excel_row = position + 2
+        excel_row = dataframe_excel_row(df, position)
         if photos_by_row.get(excel_row) is None and (
             photos_dir is None or find_photo(photos_dir, student_id) is None
         ):
@@ -836,7 +1052,10 @@ def missing_photo_rows(
 
 
 def format_row_numbers(rows: list[int]) -> str:
-    return "、".join(str(row) for row in rows)
+    if len(rows) <= 20:
+        return "、".join(str(row) for row in rows)
+    head = "、".join(str(row) for row in rows[:20])
+    return f"{head} 等"
 
 
 def validate_counselor_pair(
@@ -856,6 +1075,9 @@ def validate_counselor_pair(
         errors.append(f"{excel.name}：缺少列 {', '.join(missing_columns)}")
     generate_blacklist(excel)
     photo_rows = missing_photo_rows(excel, photos_dir)
+    summary = photo_import_summary(excel, base_name)
+    if summary:
+        warnings.append(summary)
     if photo_rows:
         warnings.append(
             f"{excel.name}：缺少照片，涉及行 {format_row_numbers(photo_rows)}（共 {len(photo_rows)} 行）"

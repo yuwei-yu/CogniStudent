@@ -396,7 +396,7 @@ class AdminWindow(QMainWindow):
             return
         self.refresh_counselors()
         text = f"导入：{len(report['imported'])}；跳过：{len(report['skipped'])}；警告：{len(report['warnings'])}；错误：{len(report['errors'])}"
-        details = "\n".join(report["warnings"][:30] + report["errors"][:30])
+        details = "\n".join(report["warnings"] + report["errors"])
         QMessageBox.information(self, "导入完成", f"{text}\n\n{details}" if details else text)
 
     def download_template(self) -> None:
