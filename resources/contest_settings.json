@@ -8,7 +8,8 @@
   "locate_question_count": 10,
   "enabled_rounds": [
     "大海捞针",
-    "鱼目混珠"
+    "鱼目混珠",
+    "描述定位"
   ],
   "answer_fields": [
     "学生姓名",

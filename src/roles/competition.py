@@ -25,6 +25,7 @@ from game.rounds import (
     build_locate_questions,
     build_mixed_round,
     build_needle_round,
+    is_name_field,
     student_field_value,
 )
 from utils.logo import logo_label
@@ -605,7 +606,7 @@ class CompetitionControlWindow(QMainWindow):
     ) -> str:
         if not students:
             return "<p class='empty'>暂无标准信息。</p>"
-        fields = ["姓名", *[field for field in self.answer_fields if field != "姓名"]]
+        fields = ["姓名", *[field for field in self.answer_fields if not is_name_field(field)]]
         headers = ["字段"] + [
             f"编号 {number_by_id.get(id(student), index)}"
             for index, student in enumerate(students, start=1)
@@ -640,8 +641,10 @@ class CompetitionControlWindow(QMainWindow):
         values = student.answer_fields()
         rows = []
         for field in self.answer_fields:
-            if not include_name and field == "姓名":
-                continue
+            if is_name_field(field):
+                if not include_name:
+                    continue
+                field = "姓名"
             rows.append(
                 "<tr class='answer-info-row'>"
                 f"<td class='answer-info-key'>{escape(str(field))}：</td>"
@@ -669,7 +672,7 @@ class CompetitionControlWindow(QMainWindow):
         fields = [
             field
             for field in self.answer_fields
-            if not (include_answer_label and field == "姓名")
+            if not (include_answer_label and is_name_field(field))
         ]
         headers = ["编号", *fields]
         if include_answer_label:
@@ -723,8 +726,7 @@ class CompetitionControlWindow(QMainWindow):
             return "<p class='empty'>暂无描述定位题目。</p>"
         question = self.locate_questions[self.locate_index]
         return (
-            self.render_question_intro()
-            + f"<div class='locate-question-card'>"
+            f"<div class='locate-question-card'>"
             + f"<div class='locate-question-title'>题 {self.locate_index + 1} / {len(self.locate_questions)}</div>"
             + self.render_locate_question_table([question])
             + "</div>"

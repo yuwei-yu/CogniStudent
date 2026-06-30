@@ -66,6 +66,18 @@ def build_mixed_round(
     return MixedRound(own_students=own, distractors=distractors, duration_seconds=duration_seconds)
 
 
+def canonical_field_name(field: str) -> str:
+    stripped = str(field).strip()
+    for canonical, aliases in data_manager.COLUMN_ALIASES.items():
+        if stripped == canonical or stripped in aliases:
+            return canonical
+    return stripped
+
+
+def is_name_field(field: str) -> bool:
+    return canonical_field_name(field) == "姓名"
+
+
 def build_locate_questions(
     students: list[Student],
     count: int = 2,
@@ -88,7 +100,7 @@ def build_locate_questions(
             fields = {
                 field: student_field_value(student, field, values)
                 for field in clue_fields
-                if field not in {"姓名", "学号"}
+                if canonical_field_name(field) not in {"姓名", "学号"}
             }
         questions.append(LocateQuestion(answer=student, clues=fields))
     return questions

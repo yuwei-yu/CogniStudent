@@ -14,8 +14,15 @@ import pandas as pd
 from openpyxl import load_workbook
 
 from data.models import Counselor, Student
-from utils.helpers import app_root, bundled_root, copy_file, ensure_dir, read_json, resources_root, write_json
-
+from utils.helpers import (
+    app_root,
+    bundled_root,
+    copy_file,
+    ensure_dir,
+    read_json,
+    resources_root,
+    write_json,
+)
 
 ADMIN_CONFIG = "admin_config.json"
 CONTEST_CONFIG = "contest_config.json"
@@ -132,7 +139,9 @@ def activity_path(activity_name: str) -> Path:
 def set_current_activity(activity_name: str) -> None:
     global CURRENT_ACTIVITY
     CURRENT_ACTIVITY = DEFAULT_ACTIVITY_NAME
-    write_json(resources_root() / CURRENT_ACTIVITY_FILE, {"activity": DEFAULT_ACTIVITY_NAME})
+    write_json(
+        resources_root() / CURRENT_ACTIVITY_FILE, {"activity": DEFAULT_ACTIVITY_NAME}
+    )
 
 
 def get_current_activity() -> Optional[str]:
@@ -183,12 +192,22 @@ def get_counselors(activity_path: Path) -> list[Counselor]:
     result: list[Counselor] = []
     if not activity_path.exists():
         return result
-    excel_files = sorted(list(activity_path.glob("*.xls")) + list(activity_path.glob("*.xlsx")))
+    excel_files = sorted(
+        list(activity_path.glob("*.xls")) + list(activity_path.glob("*.xlsx"))
+    )
     for excel in excel_files:
         base = excel.stem
         photos_dir = activity_path / base
         name, employee_id = split_counselor_base(base)
-        result.append(Counselor(name=name, employee_id=employee_id, base_name=base, excel_path=excel, photos_dir=photos_dir))
+        result.append(
+            Counselor(
+                name=name,
+                employee_id=employee_id,
+                base_name=base,
+                excel_path=excel,
+                photos_dir=photos_dir,
+            )
+        )
     return result
 
 
@@ -197,7 +216,9 @@ def authenticate_admin(username: str, password: str) -> bool:
     return username == cfg.get("username") and password == cfg.get("password")
 
 
-def authenticate_counselor(activity_path: Path, name: str, pwd: str) -> Optional[Counselor]:
+def authenticate_counselor(
+    activity_path: Path, name: str, pwd: str
+) -> Optional[Counselor]:
     for counselor in get_counselors(activity_path):
         if counselor.name == name.strip() and counselor.employee_id == pwd.strip():
             return counselor
@@ -254,8 +275,13 @@ def student_identity(student_id: str, name: str) -> str:
     return f"{student_id}\t{name.strip()}"
 
 
-def has_trailing_name_space(value: str) -> bool:
-    return value.endswith((" ", "\u3000"))
+def has_blacklist_name_suffix(value: str) -> bool:
+    trailing_count = 0
+    for char in reversed(value):
+        if char not in {" ", "\u3000"}:
+            break
+        trailing_count += 1
+    return trailing_count >= 5
 
 
 def read_blacklist(excel_path: Path) -> set[str]:
@@ -292,7 +318,7 @@ def generate_blacklist(excel_path: Path) -> list[dict[str, str]]:
         if not any(extra.values()):
             continue
         raw_name = raw_cell_text(row.get("姓名", ""))
-        if not raw_name or not has_trailing_name_space(raw_name):
+        if not raw_name or not has_blacklist_name_suffix(raw_name):
             continue
         student_id = clean_cell(row.get("学号", ""))
         name = clean_cell(raw_name)
@@ -305,7 +331,6 @@ def generate_blacklist(excel_path: Path) -> list[dict[str, str]]:
                 "Excel行号": str(position + 2),
                 "学号": student_id,
                 "姓名": name,
-                "原因": "学生姓名以空格结尾",
             }
         )
     write_blacklist_file(excel_path, rows)
@@ -395,7 +420,9 @@ def image_sort_key(image) -> int:
 
 
 def xlsx_part_rels_path(part_path: str) -> str:
-    return posixpath.join(posixpath.dirname(part_path), "_rels", f"{posixpath.basename(part_path)}.rels")
+    return posixpath.join(
+        posixpath.dirname(part_path), "_rels", f"{posixpath.basename(part_path)}.rels"
+    )
 
 
 def resolve_xlsx_target(source_part: str, target: str) -> str:
@@ -404,7 +431,9 @@ def resolve_xlsx_target(source_part: str, target: str) -> str:
     return posixpath.normpath(posixpath.join(posixpath.dirname(source_part), target))
 
 
-def xlsx_relationships(zf: zipfile.ZipFile, part_path: str) -> dict[str, tuple[str, str]]:
+def xlsx_relationships(
+    zf: zipfile.ZipFile, part_path: str
+) -> dict[str, tuple[str, str]]:
     rels_path = xlsx_part_rels_path(part_path)
     if rels_path not in zf.namelist():
         return {}
@@ -424,7 +453,11 @@ def worksheet_part_path(zf: zipfile.ZipFile, worksheet) -> str:
     path = str(getattr(worksheet, "path", "")).lstrip("/")
     if path in zf.namelist():
         return path
-    worksheet_parts = sorted(name for name in zf.namelist() if name.startswith("xl/worksheets/") and name.endswith(".xml"))
+    worksheet_parts = sorted(
+        name
+        for name in zf.namelist()
+        if name.startswith("xl/worksheets/") and name.endswith(".xml")
+    )
     return worksheet_parts[0] if worksheet_parts else ""
 
 
@@ -436,7 +469,9 @@ def drawing_anchor_center(anchor) -> tuple[Optional[int], Optional[float]]:
     if row_text is None:
         return None, None
     start_row = int(row_text)
-    start_offset_text = marker.findtext("xdr:rowOff", default="0", namespaces=NS_DRAWING)
+    start_offset_text = marker.findtext(
+        "xdr:rowOff", default="0", namespaces=NS_DRAWING
+    )
     start_offset = int(start_offset_text or 0)
     end_marker = anchor.find("xdr:to", NS_DRAWING)
     if end_marker is None:
@@ -445,7 +480,9 @@ def drawing_anchor_center(anchor) -> tuple[Optional[int], Optional[float]]:
     if end_row_text is None:
         return start_row + 1, float(start_row + 1)
     end_row = int(end_row_text)
-    end_offset_text = end_marker.findtext("xdr:rowOff", default="0", namespaces=NS_DRAWING)
+    end_offset_text = end_marker.findtext(
+        "xdr:rowOff", default="0", namespaces=NS_DRAWING
+    )
     end_offset = int(end_offset_text or 0)
     start_pos = start_row + float(start_offset) / 9_525_000
     end_pos = end_row + float(end_offset) / 9_525_000
@@ -459,7 +496,11 @@ def raw_xlsx_image_items(excel_path: Path, worksheet) -> list[dict]:
         if not sheet_part:
             return items
         sheet_rels = xlsx_relationships(zf, sheet_part)
-        drawing_parts = [target for target, rel_type in sheet_rels.values() if rel_type.endswith("/drawing")]
+        drawing_parts = [
+            target
+            for target, rel_type in sheet_rels.values()
+            if rel_type.endswith("/drawing")
+        ]
         order = 0
         for drawing_part in drawing_parts:
             if drawing_part not in zf.namelist():
@@ -472,7 +513,9 @@ def raw_xlsx_image_items(excel_path: Path, worksheet) -> list[dict]:
                 blip = anchor.find(".//a:blip", NS_DRAWING)
                 if blip is None:
                     continue
-                rel_id = blip.attrib.get(f"{OFFICE_REL_NS}embed") or blip.attrib.get(f"{OFFICE_REL_NS}link")
+                rel_id = blip.attrib.get(f"{OFFICE_REL_NS}embed") or blip.attrib.get(
+                    f"{OFFICE_REL_NS}link"
+                )
                 if not rel_id or rel_id not in drawing_rels:
                     continue
                 media_part, rel_type = drawing_rels[rel_id]
@@ -612,36 +655,55 @@ def extract_excel_photos(excel_path: Path, df: pd.DataFrame) -> dict[int, Path]:
     return {int(row): cache_dir / filename for row, filename in rows.items()}
 
 
-def best_photo_rows(image_items: list[dict], valid_rows: set[int]) -> tuple[dict[int, tuple[bytes, str]], str]:
+def best_photo_rows(
+    image_items: list[dict], valid_rows: set[int]
+) -> tuple[dict[int, tuple[bytes, str]], str]:
     anchor_rows = match_photos_by_anchor(image_items, valid_rows)
     order_rows = match_photos_by_order(image_items, valid_rows)
-    if photo_match_score(order_rows, valid_rows) > photo_match_score(anchor_rows, valid_rows):
+    if photo_match_score(order_rows, valid_rows) > photo_match_score(
+        anchor_rows, valid_rows
+    ):
         return order_rows, "order"
     return anchor_rows, "anchor"
 
 
-def photo_match_score(rows: dict[int, tuple[bytes, str]], valid_rows: set[int]) -> tuple[int, int]:
+def photo_match_score(
+    rows: dict[int, tuple[bytes, str]], valid_rows: set[int]
+) -> tuple[int, int]:
     return (len(set(rows) & valid_rows), -abs(len(rows) - len(valid_rows)))
 
 
-def match_photos_by_anchor(image_items: list[dict], valid_rows: set[int]) -> dict[int, tuple[bytes, str]]:
+def match_photos_by_anchor(
+    image_items: list[dict], valid_rows: set[int]
+) -> dict[int, tuple[bytes, str]]:
     rows: dict[int, tuple[bytes, str]] = {}
     pending: list[dict] = []
     for item in image_items:
-        row_number = nearest_student_row(item["center"], valid_rows) or item["anchor_row"]
-        if row_number is None or row_number <= 1 or row_number not in valid_rows or row_number in rows:
+        row_number = (
+            nearest_student_row(item["center"], valid_rows) or item["anchor_row"]
+        )
+        if (
+            row_number is None
+            or row_number <= 1
+            or row_number not in valid_rows
+            or row_number in rows
+        ):
             pending.append(item)
             continue
         rows[row_number] = (item["data"], item["suffix"])
 
     missing_rows = sorted(valid_rows - set(rows))
     if pending and len(pending) == len(missing_rows):
-        for row_number, item in zip(missing_rows, sorted(pending, key=lambda value: value["order"])):
+        for row_number, item in zip(
+            missing_rows, sorted(pending, key=lambda value: value["order"])
+        ):
             rows[row_number] = (item["data"], item["suffix"])
     return rows
 
 
-def match_photos_by_order(image_items: list[dict], valid_rows: set[int]) -> dict[int, tuple[bytes, str]]:
+def match_photos_by_order(
+    image_items: list[dict], valid_rows: set[int]
+) -> dict[int, tuple[bytes, str]]:
     rows: dict[int, tuple[bytes, str]] = {}
     sorted_items = sorted(image_items, key=lambda value: value["order"])
     for row_number, item in zip(sorted(valid_rows), sorted_items):
@@ -739,7 +801,9 @@ def load_students(
     return students
 
 
-def load_all_students_for_judge(activity_path: Path, counselor_id_list: Iterable[str]) -> list[Student]:
+def load_all_students_for_judge(
+    activity_path: Path, counselor_id_list: Iterable[str]
+) -> list[Student]:
     ids = set(counselor_id_list)
     result: list[Student] = []
     for counselor in get_counselors(activity_path):
@@ -748,7 +812,9 @@ def load_all_students_for_judge(activity_path: Path, counselor_id_list: Iterable
     return result
 
 
-def missing_photo_rows(excel_path: Path, photos_dir: Optional[Path] = None) -> list[int]:
+def missing_photo_rows(
+    excel_path: Path, photos_dir: Optional[Path] = None
+) -> list[int]:
     df = normalize_columns(read_excel(excel_path))
     photos_by_row = extract_excel_photos(excel_path, df)
     blacklist = read_blacklist(excel_path)
@@ -762,7 +828,9 @@ def missing_photo_rows(excel_path: Path, photos_dir: Optional[Path] = None) -> l
         if not student_id or student_identity(student_id, name) in blacklist:
             continue
         excel_row = position + 2
-        if photos_by_row.get(excel_row) is None and (photos_dir is None or find_photo(photos_dir, student_id) is None):
+        if photos_by_row.get(excel_row) is None and (
+            photos_dir is None or find_photo(photos_dir, student_id) is None
+        ):
             rows.append(excel_row)
     return rows
 
@@ -771,7 +839,9 @@ def format_row_numbers(rows: list[int]) -> str:
     return "、".join(str(row) for row in rows)
 
 
-def validate_counselor_pair(activity_path: Path, base_name: str) -> tuple[bool, list[str], list[str]]:
+def validate_counselor_pair(
+    activity_path: Path, base_name: str
+) -> tuple[bool, list[str], list[str]]:
     excel = activity_path / f"{base_name}.xls"
     if not excel.exists():
         excel = activity_path / f"{base_name}.xlsx"
@@ -787,7 +857,9 @@ def validate_counselor_pair(activity_path: Path, base_name: str) -> tuple[bool, 
     generate_blacklist(excel)
     photo_rows = missing_photo_rows(excel, photos_dir)
     if photo_rows:
-        warnings.append(f"{excel.name}：缺少照片，涉及行 {format_row_numbers(photo_rows)}（共 {len(photo_rows)} 行）")
+        warnings.append(
+            f"{excel.name}：缺少照片，涉及行 {format_row_numbers(photo_rows)}（共 {len(photo_rows)} 行）"
+        )
     return not errors, errors, warnings
 
 
@@ -851,13 +923,18 @@ def upload_zip(
     ensure_dir(activity_path)
     report = {"imported": [], "skipped": [], "warnings": [], "errors": []}
     with zipfile.ZipFile(zip_path) as zf:
-        members = [(info, normalize_zip_member_name(decode_zip_member_name(info))) for info in zf.infolist()]
+        members = [
+            (info, normalize_zip_member_name(decode_zip_member_name(info)))
+            for info in zf.infolist()
+        ]
         unsafe = [name for _, name in members if not is_safe_zip_member(name)]
         if unsafe:
             raise ValueError(f"压缩包包含不安全路径：{unsafe[0]}")
         names = [PurePosixPath(name) for info, name in members if not info.is_dir()]
         root_parts = [p.parts[0] for p in names if len(p.parts) >= 2]
-        strip_root = len(set(root_parts)) == 1 and not any(len(p.parts) == 1 for p in names)
+        strip_root = len(set(root_parts)) == 1 and not any(
+            len(p.parts) == 1 for p in names
+        )
         tmp = activity_path / ".upload_tmp"
         if tmp.exists():
             shutil.rmtree(tmp)
@@ -888,15 +965,21 @@ def upload_zip(
             for excel in excel_files:
                 base = excel.stem
                 if base in seen_bases:
-                    report["errors"].append(f"{base} 存在重名 Excel，请修改文件名后重新导入")
+                    report["errors"].append(
+                        f"{base} 存在重名 Excel，请修改文件名后重新导入"
+                    )
                     continue
                 seen_bases.add(base)
                 folder = excel.parent / base
-                complete_bases.append((base, excel, folder if folder.is_dir() else None))
+                complete_bases.append(
+                    (base, excel, folder if folder.is_dir() else None)
+                )
             if replace_existing and complete_bases:
                 clear_activity_counselor_data(activity_path)
             for base, excel, folder in complete_bases:
-                if (activity_path / excel.name).exists() or (activity_path / base).exists():
+                if (activity_path / excel.name).exists() or (
+                    activity_path / base
+                ).exists():
                     if not overwrite:
                         report["skipped"].append(base)
                         continue
@@ -991,7 +1074,10 @@ def import_data_package(zip_path: Path, overwrite: bool = True) -> dict[str, lis
     ensure_dir(root)
     report = {"imported": [], "skipped": [], "warnings": [], "errors": []}
     with zipfile.ZipFile(zip_path) as zf:
-        members = [(info, normalize_zip_member_name(decode_zip_member_name(info))) for info in zf.infolist()]
+        members = [
+            (info, normalize_zip_member_name(decode_zip_member_name(info)))
+            for info in zf.infolist()
+        ]
         unsafe = [name for _, name in members if not is_safe_zip_member(name)]
         if unsafe:
             raise ValueError(f"压缩包包含不安全路径：{unsafe[0]}")
@@ -1010,7 +1096,9 @@ def import_data_package(zip_path: Path, overwrite: bool = True) -> dict[str, lis
             if len(rel_parts) >= 2 and rel_parts[0] not in ROOT_RESOURCE_FILES:
                 rel_parts = (DEFAULT_ACTIVITY_NAME, *rel_parts[1:])
             elif rel_parts == (CURRENT_ACTIVITY_FILE,):
-                write_json(root / CURRENT_ACTIVITY_FILE, {"activity": DEFAULT_ACTIVITY_NAME})
+                write_json(
+                    root / CURRENT_ACTIVITY_FILE, {"activity": DEFAULT_ACTIVITY_NAME}
+                )
                 report["imported"].append(CURRENT_ACTIVITY_FILE)
                 continue
             target = root.joinpath(*rel_parts)
@@ -1027,7 +1115,9 @@ def import_data_package(zip_path: Path, overwrite: bool = True) -> dict[str, lis
 def download_template(destination: Optional[Path] = None) -> Path:
     source = app_root() / "template.zip"
     fallback = bundled_root() / "resources" / "template.zip"
-    actual_source = source if source.exists() else fallback if fallback.exists() else None
+    actual_source = (
+        source if source.exists() else fallback if fallback.exists() else None
+    )
     if actual_source is None:
         raise FileNotFoundError("未找到 template.zip，也未找到内置模板。")
     if destination is None:
@@ -1074,7 +1164,9 @@ def get_contest_settings(activity_path: Optional[Path] = None) -> dict:
         settings["enabled_rounds"] = DEFAULT_CONTEST_SETTINGS["enabled_rounds"]
     else:
         enabled = [round_name for round_name in rounds if round_name in valid_rounds]
-        settings["enabled_rounds"] = enabled or DEFAULT_CONTEST_SETTINGS["enabled_rounds"]
+        settings["enabled_rounds"] = (
+            enabled or DEFAULT_CONTEST_SETTINGS["enabled_rounds"]
+        )
     return settings
 
 
@@ -1117,7 +1209,9 @@ def load_scores(activity_path: Path) -> dict[str, dict[str, float]]:
     return data if isinstance(data, dict) else {}
 
 
-def save_score(activity_path: Path, counselor_id: str, scores: dict[str, float]) -> None:
+def save_score(
+    activity_path: Path, counselor_id: str, scores: dict[str, float]
+) -> None:
     data = load_scores(activity_path)
     data[counselor_id] = scores
     write_json(scores_path(activity_path), data)
@@ -1126,7 +1220,9 @@ def save_score(activity_path: Path, counselor_id: str, scores: dict[str, float])
 def export_scores(activity_path: Path, awards: Optional[dict[str, int]] = None) -> Path:
     data = load_scores(activity_path)
     rows = []
-    ranked = sorted(data.items(), key=lambda item: float(item[1].get("总分", 0)), reverse=True)
+    ranked = sorted(
+        data.items(), key=lambda item: float(item[1].get("总分", 0)), reverse=True
+    )
     award_labels: dict[str, str] = {}
     if awards:
         cursor = 0
@@ -1136,7 +1232,12 @@ def export_scores(activity_path: Path, awards: Optional[dict[str, int]] = None) 
                 award_labels[counselor_id] = label
             cursor += count
     for rank, (counselor_id, scores) in enumerate(ranked, start=1):
-        row = {"排名": rank, "辅导员": counselor_id, **scores, "奖项": award_labels.get(counselor_id, "")}
+        row = {
+            "排名": rank,
+            "辅导员": counselor_id,
+            **scores,
+            "奖项": award_labels.get(counselor_id, ""),
+        }
         rows.append(row)
     output = resources_root() / f"{activity_path.name}_成绩汇总.xlsx"
     pd.DataFrame(rows).to_excel(output, index=False)
