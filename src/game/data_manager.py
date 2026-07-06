@@ -99,9 +99,13 @@ COLUMN_ALIASES = {
 CURRENT_ACTIVITY: Optional[str] = None
 BOOTSTRAPPED = False
 PHOTO_CACHE_DIR = ".photo_cache"
-PHOTO_CACHE_VERSION = 9
+PHOTO_CACHE_VERSION = 11
+PHOTO_ORDER_SCALE = 1_000_000
 PHOTO_SUFFIXES = (".jpg", ".jpeg", ".png", ".JPG", ".JPEG", ".PNG")
 PHOTO_COLUMN_ALIASES = {"照片", "图片", "学生照片", "头像", "相片", "电子照片"}
+DISPIMG_RE = re.compile(r"(?:_xlfn\.)?DISPIMG\(\s*['\"]([^'\"]+)['\"]", re.I)
+CELL_REF_RE = re.compile(r"^([A-Z]+)([0-9]+)$", re.I)
+NS_SHEET = {"main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
 NS_DRAWING = {
     "a": "http://schemas.openxmlformats.org/drawingml/2006/main",
     "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
@@ -542,6 +546,21 @@ def image_sort_key(image) -> int:
     return int((image_anchor_row(image) or 0) * 1000)
 
 
+def image_item_sort_key(item: dict) -> tuple[int, int]:
+    order = item.get("order")
+    if not isinstance(order, int):
+        order = 0
+    return order, image_item_z_order(item)
+
+
+def image_item_z_order(item: dict) -> int:
+    z_order = item.get("z_order")
+    if isinstance(z_order, int):
+        return z_order
+    order = item.get("order")
+    return int(order) if isinstance(order, (float, int)) else 0
+
+
 def xlsx_part_rels_path(part_path: str) -> str:
     return posixpath.join(
         posixpath.dirname(part_path), "_rels", f"{posixpath.basename(part_path)}.rels"
@@ -645,7 +664,7 @@ def raw_xlsx_image_items(excel_path: Path, worksheet) -> list[dict]:
             for target, rel_type in sheet_rels.values()
             if rel_type.endswith("/drawing")
         ]
-        order = 0
+        z_order = 0
         for drawing_part in drawing_parts:
             if drawing_part not in zf.namelist():
                 continue
@@ -654,6 +673,8 @@ def raw_xlsx_image_items(excel_path: Path, worksheet) -> list[dict]:
             for anchor in root:
                 if not str(anchor.tag).endswith("Anchor"):
                     continue
+                anchor_z_order = z_order
+                z_order += 1
                 blip = anchor.find(".//a:blip", NS_DRAWING)
                 if blip is None:
                     continue
@@ -670,10 +691,12 @@ def raw_xlsx_image_items(excel_path: Path, worksheet) -> list[dict]:
                     continue
                 anchor_row, center, anchor_col, col_center = drawing_anchor_position(anchor)
                 suffix = Path(media_part).suffix.lower() or image_data_extension(data)
-                order_key = int((center or anchor_row or order) * 1000) + order
+                row_order = int((center or anchor_row or anchor_z_order) * 1000)
+                order_key = row_order * PHOTO_ORDER_SCALE + anchor_z_order
                 items.append(
                     {
                         "order": order_key,
+                        "z_order": anchor_z_order,
                         "center": center,
                         "anchor_row": anchor_row,
                         "col_center": col_center,
@@ -682,7 +705,124 @@ def raw_xlsx_image_items(excel_path: Path, worksheet) -> list[dict]:
                         "suffix": suffix,
                     }
                 )
-                order += 1
+    return items
+
+
+def wps_dispimg_id(value: object) -> Optional[str]:
+    text = clean_cell(value)
+    if not text:
+        return None
+    match = DISPIMG_RE.search(text)
+    return match.group(1) if match else None
+
+
+def excel_column_number(letters: str) -> int:
+    number = 0
+    for char in letters.upper():
+        if not "A" <= char <= "Z":
+            return 0
+        number = number * 26 + (ord(char) - ord("A") + 1)
+    return number
+
+
+def cell_reference_position(reference: str) -> Optional[tuple[int, int]]:
+    match = CELL_REF_RE.match(str(reference))
+    if not match:
+        return None
+    column = excel_column_number(match.group(1))
+    row = int(match.group(2))
+    if row <= 0 or column <= 0:
+        return None
+    return row, column
+
+
+def wps_sheet_dispimg_ids(excel_path: Path, worksheet) -> dict[tuple[int, int], str]:
+    ids: dict[tuple[int, int], str] = {}
+    with zipfile.ZipFile(excel_path) as zf:
+        sheet_part = worksheet_part_path(zf, worksheet)
+        if not sheet_part or sheet_part not in zf.namelist():
+            return ids
+        root = ET.fromstring(zf.read(sheet_part))
+        for cell in root.findall(".//main:c", NS_SHEET):
+            position = cell_reference_position(cell.attrib.get("r", ""))
+            if position is None:
+                continue
+            formula = cell.findtext("main:f", default="", namespaces=NS_SHEET)
+            value = cell.findtext("main:v", default="", namespaces=NS_SHEET)
+            image_id = wps_dispimg_id(formula) or wps_dispimg_id(value)
+            if image_id:
+                ids[position] = image_id
+    return ids
+
+
+def wps_cell_image_map(excel_path: Path) -> dict[str, tuple[bytes, str, int]]:
+    images: dict[str, tuple[bytes, str, int]] = {}
+    with zipfile.ZipFile(excel_path) as zf:
+        cellimage_parts = [
+            name
+            for name in zf.namelist()
+            if name.endswith("cellimages.xml") and not name.endswith(".rels")
+        ]
+        for cellimage_part in sorted(cellimage_parts):
+            rels = xlsx_relationships(zf, cellimage_part)
+            root = ET.fromstring(zf.read(cellimage_part))
+            for z_order, pic in enumerate(root.findall(".//xdr:pic", NS_DRAWING)):
+                name_node = pic.find(".//xdr:cNvPr", NS_DRAWING)
+                image_id = name_node.attrib.get("name") if name_node is not None else ""
+                if not image_id:
+                    continue
+                blip = pic.find(".//a:blip", NS_DRAWING)
+                if blip is None:
+                    continue
+                rel_id = blip.attrib.get(f"{OFFICE_REL_NS}embed") or blip.attrib.get(
+                    f"{OFFICE_REL_NS}link"
+                )
+                if not rel_id or rel_id not in rels:
+                    continue
+                media_part, rel_type = rels[rel_id]
+                if not rel_type.endswith("/image") or media_part not in zf.namelist():
+                    continue
+                data = zf.read(media_part)
+                if not data:
+                    continue
+                suffix = Path(media_part).suffix.lower() or image_data_extension(data)
+                images[image_id] = (data, suffix, z_order)
+    return images
+
+
+def wps_cell_image_items(excel_path: Path, worksheet, df: pd.DataFrame) -> list[dict]:
+    image_map = wps_cell_image_map(excel_path)
+    if not image_map:
+        return []
+
+    columns = list(df.columns)
+    photo_columns = photo_excel_columns(df) or set(range(1, len(columns) + 1))
+    sheet_image_ids = wps_sheet_dispimg_ids(excel_path, worksheet)
+    items: list[dict] = []
+    for position, (_, row) in enumerate(df.iterrows()):
+        excel_row = dataframe_excel_row(df, position)
+        for column_index in sorted(photo_columns):
+            if column_index < 1 or column_index > len(columns):
+                continue
+            image_id = wps_dispimg_id(row.get(columns[column_index - 1], ""))
+            if not image_id:
+                image_id = sheet_image_ids.get((excel_row, column_index))
+            if not image_id or image_id not in image_map:
+                continue
+            data, suffix, z_order = image_map[image_id]
+            row_order = int(excel_row * 1000)
+            items.append(
+                {
+                    "order": row_order * PHOTO_ORDER_SCALE + z_order,
+                    "z_order": z_order,
+                    "center": float(excel_row),
+                    "anchor_row": excel_row,
+                    "col_center": float(column_index),
+                    "anchor_col": column_index,
+                    "data": data,
+                    "suffix": suffix,
+                }
+            )
     return items
 
 
@@ -751,7 +891,11 @@ def photo_import_summary(excel_path: Path, base_name: str) -> Optional[str]:
         "student_index": "学生列表编号匹配",
     }
     label = labels.get(str(strategy), str(strategy) or "未知策略")
-    source_labels = {"openpyxl": "常规读取", "raw": "底层解包"}
+    source_labels = {
+        "openpyxl": "常规读取",
+        "raw": "底层解包",
+        "wps_cellimage": "WPS单元格图片",
+    }
     source_label = source_labels.get(str(photo_source), str(photo_source) or "未知来源")
     return f"{base_name} 照片导入采用{source_label}+{label}，读取 {photo_count} 张图片，命中 {len(rows)} / {student_row_count} 行"
 
@@ -774,16 +918,18 @@ def extract_excel_photos(excel_path: Path, df: pd.DataFrame) -> dict[int, Path]:
         valid_rows = student_excel_rows(df)
         valid_photo_columns = photo_excel_columns(df)
         openpyxl_items = []
-        for image in sorted(worksheet._images, key=image_sort_key):
+        for z_order, image in enumerate(worksheet._images):
             try:
                 data = image._data()
             except Exception:
                 continue
             if not data:
                 continue
+            row_order = image_sort_key(image)
             openpyxl_items.append(
                 {
-                    "order": image_sort_key(image),
+                    "order": row_order * PHOTO_ORDER_SCALE + z_order,
+                    "z_order": z_order,
                     "center": image_anchor_row_center(image),
                     "anchor_row": image_anchor_row(image),
                     "col_center": image_anchor_col_center(image),
@@ -793,8 +939,13 @@ def extract_excel_photos(excel_path: Path, df: pd.DataFrame) -> dict[int, Path]:
                 }
             )
         raw_items = raw_xlsx_image_items(excel_path, worksheet)
+        wps_items = wps_cell_image_items(excel_path, worksheet, df)
         candidates = []
-        for source, items in (("openpyxl", openpyxl_items), ("raw", raw_items)):
+        for source, items in (
+            ("openpyxl", openpyxl_items),
+            ("raw", raw_items),
+            ("wps_cellimage", wps_items),
+        ):
             candidate_rows, candidate_strategy = best_photo_rows(
                 items, df, valid_photo_columns
             )
@@ -825,6 +976,7 @@ def best_photo_rows(
     valid_photo_columns: set[int],
 ) -> tuple[dict[int, tuple[bytes, str]], str]:
     scoped_items = filter_photo_column_items(image_items, valid_photo_columns)
+    scoped_items = top_layer_photo_items(scoped_items, df, valid_photo_columns)
     indexed_rows = match_photos_by_student_index(scoped_items, df)
     if indexed_rows or scoped_items:
         return indexed_rows, "student_index"
@@ -853,10 +1005,26 @@ def filter_photo_column_items(
     return result
 
 
+def image_item_photo_column(
+    item: dict, valid_photo_columns: set[int]
+) -> Optional[int]:
+    column = nearest_photo_column(item.get("col_center"), valid_photo_columns)
+    if isinstance(column, int):
+        return column
+    anchor_col = item.get("anchor_col")
+    if isinstance(anchor_col, int):
+        return anchor_col
+    col_center = item.get("col_center")
+    if isinstance(col_center, (float, int)):
+        return int(round(col_center))
+    return None
+
+
 def match_photos_by_anchor(
     image_items: list[dict], valid_rows: set[int]
 ) -> dict[int, tuple[bytes, str]]:
     rows: dict[int, tuple[bytes, str]] = {}
+    row_z_orders: dict[int, int] = {}
     for item in image_items:
         row_number = (
             nearest_student_row(item["center"], valid_rows) or item["anchor_row"]
@@ -865,10 +1033,13 @@ def match_photos_by_anchor(
             row_number is None
             or row_number <= 1
             or row_number not in valid_rows
-            or row_number in rows
         ):
             continue
+        z_order = image_item_z_order(item)
+        if row_number in rows and z_order < row_z_orders.get(row_number, 0):
+            continue
         rows[row_number] = (item["data"], item["suffix"])
+        row_z_orders[row_number] = z_order
     return rows
 
 
@@ -884,17 +1055,45 @@ def image_item_excel_row(item: dict, slot_rows: set[int]) -> Optional[int]:
     return None
 
 
+def top_layer_photo_items(
+    image_items: list[dict], df: pd.DataFrame, valid_photo_columns: set[int]
+) -> list[dict]:
+    slots = student_photo_slots(df)
+    slot_rows = {int(slot["excel_row"]) for slot in slots}
+    if not slot_rows:
+        return image_items
+
+    top_by_slot: dict[tuple[int, Optional[int]], dict] = {}
+    unassigned_items: list[dict] = []
+    for item in image_items:
+        row_number = image_item_excel_row(item, slot_rows)
+        if row_number is None:
+            unassigned_items.append(item)
+            continue
+        column = image_item_photo_column(item, valid_photo_columns)
+        key = (row_number, column)
+        current = top_by_slot.get(key)
+        if current is None or image_item_z_order(item) >= image_item_z_order(current):
+            top_by_slot[key] = item
+
+    return sorted(
+        [*unassigned_items, *top_by_slot.values()],
+        key=image_item_sort_key,
+    )
+
+
 def match_photos_by_student_index(
     image_items: list[dict], df: pd.DataFrame
 ) -> dict[int, tuple[bytes, str]]:
     rows: dict[int, tuple[bytes, str]] = {}
+    row_z_orders: dict[int, int] = {}
     slots = student_photo_slots(df)
     if not slots:
         return rows
 
     slot_by_row = {int(slot["excel_row"]): slot for slot in slots}
     slot_rows = set(slot_by_row)
-    sorted_items = sorted(image_items, key=lambda value: value["order"])
+    sorted_items = sorted(image_items, key=image_item_sort_key)
     unresolved_items: list[dict] = []
     for item in sorted_items:
         row_number = image_item_excel_row(item, slot_rows)
@@ -902,9 +1101,13 @@ def match_photos_by_student_index(
             unresolved_items.append(item)
             continue
         slot = slot_by_row[row_number]
-        if not slot["has_student"] or row_number in rows:
+        if not slot["has_student"]:
+            continue
+        z_order = image_item_z_order(item)
+        if row_number in rows and z_order < row_z_orders.get(row_number, 0):
             continue
         rows[row_number] = (item["data"], item["suffix"])
+        row_z_orders[row_number] = z_order
 
     if rows or not unresolved_items:
         return rows
@@ -923,7 +1126,7 @@ def match_photos_by_order(
     rows: dict[int, tuple[bytes, str]] = {}
     if not allow_partial and len(image_items) != len(valid_rows):
         return rows
-    sorted_items = sorted(image_items, key=lambda value: value["order"])
+    sorted_items = sorted(image_items, key=image_item_sort_key)
     for row_number, item in zip(sorted(valid_rows), sorted_items):
         rows[row_number] = (item["data"], item["suffix"])
     return rows

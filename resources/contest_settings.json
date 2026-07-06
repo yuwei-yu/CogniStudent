@@ -2,7 +2,7 @@
   "needle_duration_seconds": 180,
   "mixed_duration_seconds": 120,
   "locate_duration_seconds": 120,
-  "needle_student_count": 3,
+  "needle_student_count": 20,
   "mixed_own_count": 2,
   "mixed_distractor_count": 8,
   "locate_question_count": 10,
