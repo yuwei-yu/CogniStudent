@@ -226,7 +226,11 @@ class JudgeWindow(QMainWindow):
             elif round_name == "鱼目混珠":
                 contest = data_manager.get_contest_counselors(self.activity_path) or [c.id for c in self.counselors]
                 others = [cid for cid in contest if cid != self.current.id]
-                other_students = data_manager.load_all_students_for_judge(self.activity_path, others)
+                other_students = data_manager.load_student_sample_for_judge(
+                    self.activity_path,
+                    others,
+                    int(self.settings["mixed_distractor_count"]),
+                )
                 round_data = build_mixed_round(
                     self.current_students,
                     other_students,

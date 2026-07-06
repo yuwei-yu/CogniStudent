@@ -42,7 +42,13 @@ class AppController:
         except Exception as exc:
             QMessageBox.critical(None, "导入失败", str(exc))
             return False
-        QMessageBox.information(None, "导入完成", f"已导入 {len(report['imported'])} 个文件。")
+        log_path = report.get("log_path")
+        log_text = f"\n\n日志：{log_path}" if log_path else ""
+        QMessageBox.information(
+            None,
+            "导入完成",
+            f"已导入 {len(report['imported'])} 个文件。{log_text}",
+        )
         return True
 
     def logout(self) -> None:

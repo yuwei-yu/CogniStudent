@@ -4,7 +4,7 @@ from functools import partial
 from pathlib import Path
 from typing import Callable, Optional
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QObject, Qt, QThread, Signal, Slot
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -34,6 +34,55 @@ from utils import theme
 from utils.logo import logo_label
 
 
+class DataImportWorker(QObject):
+    finished = Signal(dict)
+    failed = Signal(str)
+
+    def __init__(self, path: Path, activity_path: Path, is_zip: bool) -> None:
+        super().__init__()
+        self.path = path
+        self.activity_path = activity_path
+        self.is_zip = is_zip
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            if self.is_zip:
+                report = data_manager.upload_zip(
+                    self.path,
+                    self.activity_path,
+                    overwrite=True,
+                    replace_existing=True,
+                )
+            else:
+                report = data_manager.upload_excel(
+                    self.path,
+                    self.activity_path,
+                    overwrite=True,
+                    replace_existing=True,
+                )
+        except Exception as exc:
+            message = str(exc)
+            try:
+                log_path = data_manager.write_import_log(
+                    self.activity_path,
+                    "上传资料包" if self.is_zip else "上传Excel",
+                    self.path,
+                    {
+                        "imported": [],
+                        "skipped": [],
+                        "warnings": [],
+                        "errors": [str(exc)],
+                    },
+                )
+                message = f"{message}\n\n日志：{log_path}"
+            except Exception:
+                pass
+            self.failed.emit(message)
+            return
+        self.finished.emit(report)
+
+
 class AdminWindow(QMainWindow):
     def __init__(
         self,
@@ -44,6 +93,8 @@ class AdminWindow(QMainWindow):
         self.setWindowTitle("CogniStudent - 管理员")
         self.logout_callback = logout_callback
         self.theme_callback = theme_callback
+        self.import_thread: Optional[QThread] = None
+        self.import_worker: Optional[DataImportWorker] = None
         self.current_activity: Optional[str] = data_manager.get_current_activity()
         self.activity_path: Optional[Path] = None
         self.competition_window: Optional[CompetitionControlWindow] = None
@@ -380,24 +431,67 @@ class AdminWindow(QMainWindow):
         if not self.activity_path:
             QMessageBox.warning(self, "未进入比赛", "请先进入比赛详情。")
             return
+        if self.import_thread is not None and self.import_thread.isRunning():
+            QMessageBox.information(self, "正在导入", "资料正在导入中，请稍候。")
+            return
         data_file, _ = QFileDialog.getOpenFileName(self, "选择资料文件", "", "Excel/Zip files (*.xlsx *.zip)")
         if not data_file:
             return
         if QMessageBox.question(self, "确认覆盖", "上传新资料会删除当前比赛已导入的所有辅导员资料、答题次数和成绩，然后使用本次资料重新导入。是否继续？") != QMessageBox.Yes:
             return
-        try:
-            path = Path(data_file)
-            if path.suffix.lower() == ".zip":
-                report = data_manager.upload_zip(path, self.activity_path, overwrite=True, replace_existing=True)
-            else:
-                report = data_manager.upload_excel(path, self.activity_path, overwrite=True, replace_existing=True)
-        except Exception as exc:
-            QMessageBox.critical(self, "导入失败", str(exc))
+        self.start_data_import(Path(data_file))
+
+    def start_data_import(self, path: Path) -> None:
+        if not self.activity_path:
             return
+        self.setEnabled(False)
+        self.statusBar().showMessage("正在导入资料，请稍候...")
+        thread = QThread(self)
+        worker = DataImportWorker(
+            path,
+            self.activity_path,
+            path.suffix.lower() == ".zip",
+        )
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self.on_data_import_finished)
+        worker.failed.connect(self.on_data_import_failed)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self.on_data_import_thread_finished)
+        self.import_thread = thread
+        self.import_worker = worker
+        thread.start()
+
+    @Slot(dict)
+    def on_data_import_finished(self, report: dict) -> None:
+        self.setEnabled(True)
+        self.statusBar().clearMessage()
         self.refresh_counselors()
         text = f"导入：{len(report['imported'])}；跳过：{len(report['skipped'])}；警告：{len(report['warnings'])}；错误：{len(report['errors'])}"
         details = "\n".join(report["warnings"] + report["errors"])
-        QMessageBox.information(self, "导入完成", f"{text}\n\n{details}" if details else text)
+        log_path = report.get("log_path")
+        log_text = f"\n\n日志：{log_path}" if log_path else ""
+        QMessageBox.information(
+            self,
+            "导入完成",
+            f"{text}\n\n{details}{log_text}" if details else f"{text}{log_text}",
+        )
+
+    @Slot(str)
+    def on_data_import_failed(self, message: str) -> None:
+        self.setEnabled(True)
+        self.statusBar().clearMessage()
+        QMessageBox.critical(self, "导入失败", message)
+
+    @Slot()
+    def on_data_import_thread_finished(self) -> None:
+        self.import_thread = None
+        self.import_worker = None
+        self.setEnabled(True)
+        self.statusBar().clearMessage()
 
     def download_template(self) -> None:
         path, _ = QFileDialog.getSaveFileName(self, "保存上传模板", "template.zip", "Zip files (*.zip)")
@@ -420,7 +514,13 @@ class AdminWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.critical(self, "导入失败", str(exc))
             return
-        QMessageBox.information(self, "导入完成", f"导入文件：{len(report['imported'])}；跳过：{len(report['skipped'])}")
+        log_path = report.get("log_path")
+        log_text = f"\n\n日志：{log_path}" if log_path else ""
+        QMessageBox.information(
+            self,
+            "导入完成",
+            f"导入文件：{len(report['imported'])}；跳过：{len(report['skipped'])}{log_text}",
+        )
 
     def export_all_data(self) -> None:
         path, _ = QFileDialog.getSaveFileName(self, "一键导出全部数据", "CogniStudent_历史数据.zip", "Zip files (*.zip)")

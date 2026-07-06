@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import posixpath
+import random
 import re
 import shutil
 import xml.etree.ElementTree as ET
@@ -12,6 +13,11 @@ from typing import Iterable, Optional
 
 import pandas as pd
 from openpyxl import load_workbook
+try:
+    from PySide6.QtCore import QBuffer, QByteArray, QIODevice, Qt
+    from PySide6.QtGui import QImage
+except Exception:
+    QBuffer = QByteArray = QIODevice = Qt = QImage = None
 
 from data.models import Counselor, Student
 from utils.helpers import (
@@ -32,6 +38,7 @@ ATTEMPTS_FILE = "contest_attempts.json"
 CURRENT_ACTIVITY_FILE = ".current_activity.json"
 BLACKLIST_SUFFIX = ".blacklist.json"
 DEFAULT_ACTIVITY_NAME = "比赛"
+IMPORT_LOG_FILE = "import_log.txt"
 ROOT_RESOURCE_FILES = {
     ADMIN_CONFIG,
     CONTEST_SETTINGS,
@@ -99,8 +106,11 @@ COLUMN_ALIASES = {
 CURRENT_ACTIVITY: Optional[str] = None
 BOOTSTRAPPED = False
 PHOTO_CACHE_DIR = ".photo_cache"
-PHOTO_CACHE_VERSION = 11
+PHOTO_CACHE_VERSION = 12
 PHOTO_ORDER_SCALE = 1_000_000
+PHOTO_MAX_IMAGE_SIDE = 640
+PHOTO_RESIZE_MIN_BYTES = 200 * 1024
+PHOTO_JPEG_QUALITY = 82
 PHOTO_SUFFIXES = (".jpg", ".jpeg", ".png", ".JPG", ".JPEG", ".PNG")
 PHOTO_COLUMN_ALIASES = {"照片", "图片", "学生照片", "头像", "相片", "电子照片"}
 DISPIMG_RE = re.compile(r"(?:_xlfn\.)?DISPIMG\(\s*['\"]([^'\"]+)['\"]", re.I)
@@ -113,6 +123,7 @@ NS_DRAWING = {
 }
 REL_NS = "{http://schemas.openxmlformats.org/package/2006/relationships}"
 OFFICE_REL_NS = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
+STUDENT_CACHE: dict[tuple[object, ...], list[Student]] = {}
 
 
 def bootstrap() -> None:
@@ -438,6 +449,45 @@ def image_data_extension(data: bytes) -> str:
     if data.startswith(b"BM"):
         return ".bmp"
     return ".png"
+
+
+def optimized_photo_data(data: bytes, suffix: str) -> tuple[bytes, str]:
+    if QImage is None or QByteArray is None or QBuffer is None or QIODevice is None:
+        return data, suffix
+    image = QImage()
+    if not image.loadFromData(data):
+        return data, suffix
+    width = image.width()
+    height = image.height()
+    if (
+        max(width, height) <= PHOTO_MAX_IMAGE_SIDE
+        and len(data) <= PHOTO_RESIZE_MIN_BYTES
+    ):
+        return data, suffix
+    if max(width, height) > PHOTO_MAX_IMAGE_SIDE and Qt is not None:
+        image = image.scaled(
+            PHOTO_MAX_IMAGE_SIDE,
+            PHOTO_MAX_IMAGE_SIDE,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+    has_alpha = bool(image.hasAlphaChannel())
+    output_format = "PNG" if suffix.lower() == ".png" and has_alpha else "JPG"
+    output_suffix = ".png" if output_format == "PNG" else ".jpg"
+    output = QByteArray()
+    buffer = QBuffer(output)
+    if not buffer.open(QIODevice.OpenModeFlag.WriteOnly):
+        return data, suffix
+    try:
+        quality = -1 if output_format == "PNG" else PHOTO_JPEG_QUALITY
+        if not image.save(buffer, output_format, quality):
+            return data, suffix
+    finally:
+        buffer.close()
+    optimized = bytes(output)
+    if not optimized or len(optimized) >= len(data):
+        return data, suffix
+    return optimized, output_suffix
 
 
 def image_anchor_marker(image, attr: str):
@@ -1160,6 +1210,7 @@ def save_excel_photo(
         student_id = ""
     count = row_counts.get(row_number, 0) + 1
     row_counts[row_number] = count
+    data, suffix = optimized_photo_data(data, suffix)
     stem = safe_photo_stem(student_id, f"row_{row_number}")
     filename = f"{stem}{suffix}" if count == 1 else f"{stem}_{count}{suffix}"
     target = cache_dir / filename
@@ -1178,11 +1229,97 @@ def find_photo(photos_dir: Path, student_id: str) -> Optional[Path]:
     return None
 
 
+def file_cache_signature(path: Optional[Path]) -> tuple[str, int, int]:
+    if path is None or not path.exists():
+        return ("", 0, 0)
+    stat = path.stat()
+    return (str(path.resolve()), stat.st_mtime_ns, stat.st_size)
+
+
+def directory_cache_signature(path: Optional[Path]) -> tuple[str, int, int]:
+    if path is None or not path.is_dir():
+        return ("", 0, 0)
+    stat = path.stat()
+    return (str(path.resolve()), stat.st_mtime_ns, len(list(path.iterdir())))
+
+
+def load_students_cache_key(
+    excel_path: Path, photos_dir: Optional[Path], include_blacklisted: bool
+) -> tuple[object, ...]:
+    return (
+        PHOTO_CACHE_VERSION,
+        file_cache_signature(excel_path),
+        file_cache_signature(blacklist_path(excel_path)),
+        directory_cache_signature(photos_dir),
+        include_blacklisted,
+    )
+
+
+def clear_student_cache() -> None:
+    STUDENT_CACHE.clear()
+
+
+def import_log_path(base_path: Path) -> Path:
+    return base_path / IMPORT_LOG_FILE
+
+
+def format_report_entries(title: str, entries: object) -> list[str]:
+    if not isinstance(entries, list) or not entries:
+        return [f"{title}：无"]
+    lines = [f"{title}：{len(entries)}"]
+    lines.extend(f"  - {entry}" for entry in entries)
+    return lines
+
+
+def write_import_log(
+    log_dir: Path,
+    operation: str,
+    source_path: Optional[Path],
+    report: dict,
+) -> Path:
+    ensure_dir(log_dir)
+    path = import_log_path(log_dir)
+    imported = report.get("imported", [])
+    skipped = report.get("skipped", [])
+    warnings = report.get("warnings", [])
+    errors = report.get("errors", [])
+    lines = [
+        "=" * 72,
+        f"时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"操作：{operation}",
+        f"来源：{source_path if source_path is not None else '无'}",
+        f"目标：{log_dir}",
+        (
+            "摘要："
+            f"导入 {len(imported) if isinstance(imported, list) else 0}；"
+            f"跳过 {len(skipped) if isinstance(skipped, list) else 0}；"
+            f"警告 {len(warnings) if isinstance(warnings, list) else 0}；"
+            f"错误 {len(errors) if isinstance(errors, list) else 0}"
+        ),
+        "",
+    ]
+    lines.extend(format_report_entries("导入", imported))
+    lines.extend(format_report_entries("跳过", skipped))
+    lines.extend(format_report_entries("警告", warnings))
+    lines.extend(format_report_entries("错误", errors))
+    lines.append("")
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write("\n".join(lines))
+        handle.write("\n")
+    report["log_path"] = str(path)
+    return path
+
+
 def load_students(
     excel_path: Path,
     photos_dir: Optional[Path] = None,
     include_blacklisted: bool = False,
 ) -> list[Student]:
+    cache_key = load_students_cache_key(excel_path, photos_dir, include_blacklisted)
+    cached = STUDENT_CACHE.get(cache_key)
+    if cached is not None:
+        return list(cached)
+
     df = normalize_columns(read_excel(excel_path))
     photos_by_row = extract_excel_photos(excel_path, df)
     students: list[Student] = []
@@ -1219,6 +1356,7 @@ def load_students(
                 extra=extra,
             )
         )
+    STUDENT_CACHE[cache_key] = list(students)
     return students
 
 
@@ -1230,6 +1368,30 @@ def load_all_students_for_judge(
     for counselor in get_counselors(activity_path):
         if counselor.id in ids:
             result.extend(load_students(counselor.excel_path, counselor.photos_dir))
+    return result
+
+
+def load_student_sample_for_judge(
+    activity_path: Path,
+    counselor_id_list: Iterable[str],
+    count: int,
+    pool_multiplier: int = 4,
+) -> list[Student]:
+    if count <= 0:
+        return []
+    ids = set(counselor_id_list)
+    counselors = [
+        counselor for counselor in get_counselors(activity_path) if counselor.id in ids
+    ]
+    random.shuffle(counselors)
+    target_pool_size = max(count, count * pool_multiplier)
+    result: list[Student] = []
+    for counselor in counselors:
+        result.extend(load_students(counselor.excel_path, counselor.photos_dir))
+        if target_pool_size > 0 and len(result) >= target_pool_size:
+            break
+    if count > 0 and len(result) > count:
+        return random.sample(result, count)
     return result
 
 
@@ -1320,6 +1482,7 @@ def is_safe_zip_member(member: str) -> bool:
 
 
 def clear_activity_counselor_data(activity_path: Path) -> None:
+    clear_student_cache()
     for excel in list(activity_path.glob("*.xls")) + list(activity_path.glob("*.xlsx")):
         excel.unlink()
     for blacklist in activity_path.glob(f"*{BLACKLIST_SUFFIX}"):
@@ -1345,6 +1508,7 @@ def upload_zip(
     overwrite: bool = False,
     replace_existing: bool = False,
 ) -> dict[str, list[str]]:
+    clear_student_cache()
     ensure_dir(activity_path)
     report = {"imported": [], "skipped": [], "warnings": [], "errors": []}
     with zipfile.ZipFile(zip_path) as zf:
@@ -1426,6 +1590,7 @@ def upload_zip(
         finally:
             if tmp.exists():
                 shutil.rmtree(tmp)
+    write_import_log(activity_path, "上传资料包", zip_path, report)
     return report
 
 
@@ -1435,14 +1600,18 @@ def upload_excel(
     overwrite: bool = False,
     replace_existing: bool = False,
 ) -> dict[str, list[str]]:
+    clear_student_cache()
     ensure_dir(activity_path)
     report = {"imported": [], "skipped": [], "warnings": [], "errors": []}
+    source_path = excel_path
     if excel_path.suffix.lower() != ".xlsx":
         report["errors"].append(f"{excel_path.name} 不是 .xlsx 文件")
+        write_import_log(activity_path, "上传Excel", source_path, report)
         return report
     base = excel_path.stem
     if not base:
         report["errors"].append("Excel 文件名不能为空")
+        write_import_log(activity_path, "上传Excel", source_path, report)
         return report
     target = activity_path / excel_path.name
     if excel_path.resolve() == target.resolve():
@@ -1455,6 +1624,7 @@ def upload_excel(
     elif target.exists():
         if not overwrite:
             report["skipped"].append(base)
+            write_import_log(activity_path, "上传Excel", source_path, report)
             return report
         target.unlink()
         old_blacklist = activity_path / f"{base}{BLACKLIST_SUFFIX}"
@@ -1471,6 +1641,7 @@ def upload_excel(
         temp_dir = activity_path / ".upload_tmp"
         if temp_dir.exists():
             shutil.rmtree(temp_dir)
+    write_import_log(activity_path, "上传Excel", source_path, report)
     return report
 
 
@@ -1495,6 +1666,7 @@ def export_all_data_package(destination: Path) -> Path:
 
 
 def import_data_package(zip_path: Path, overwrite: bool = True) -> dict[str, list[str]]:
+    clear_student_cache()
     root = resources_root()
     ensure_dir(root)
     report = {"imported": [], "skipped": [], "warnings": [], "errors": []}
@@ -1534,6 +1706,7 @@ def import_data_package(zip_path: Path, overwrite: bool = True) -> dict[str, lis
             with zf.open(info) as src, target.open("wb") as dst:
                 shutil.copyfileobj(src, dst)
             report["imported"].append(str(target.relative_to(root)))
+    write_import_log(root, "导入历史数据", zip_path, report)
     return report
 
 

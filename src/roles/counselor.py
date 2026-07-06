@@ -251,7 +251,11 @@ class CounselorWindow(QMainWindow):
             contest = data_manager.get_contest_counselors(self.activity_path)
             if contest and not self.training.isChecked():
                 other_ids = [cid for cid in contest if cid != self.counselor.id]
-            others = data_manager.load_all_students_for_judge(self.activity_path, other_ids)
+            others = data_manager.load_student_sample_for_judge(
+                self.activity_path,
+                other_ids,
+                int(self.settings["mixed_distractor_count"]),
+            )
             if len(self.students) < 2 or len(others) < 1:
                 QMessageBox.warning(self, "学生不足", "需要至少2名本人学生和其他辅导员学生作为干扰项。")
                 return
