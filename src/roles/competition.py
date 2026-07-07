@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QFrame,
     QTextBrowser,
     QVBoxLayout,
     QWidget,
@@ -28,9 +29,11 @@ from game.rounds import (
     is_name_field,
     student_field_value,
 )
+from utils import theme
 from utils.logo import logo_label
 
 PHOTO_HEIGHT_RATIO = 4 / 3
+JUDGE_FIELD_COLUMN_WIDTH = 250
 
 
 class JudgeDisplayWindow(QMainWindow):
@@ -39,13 +42,45 @@ class JudgeDisplayWindow(QMainWindow):
         self.setWindowTitle("评委屏")
         self.title_label = QLabel("评委屏")
         self.title_label.setObjectName("titleLabel")
+        self.timer_label = QLabel("")
+        self.timer_label.setObjectName("judgeTimerLabel")
         self.browser = QTextBrowser()
         self.browser.setOpenExternalLinks(False)
+        self.browser.setFrameShape(QFrame.NoFrame)
         central = QWidget()
+        central.setObjectName("judgeDisplayRoot")
+        dark = theme.current_theme() == "dark"
+        title_color = "#eef2f7" if dark else "#111827"
+        timer_color = "#c8d0da" if dark else "#98a2b3"
+        central.setStyleSheet(f"""
+            #judgeDisplayRoot {{
+                background: transparent;
+            }}
+            QLabel#titleLabel {{
+                color: {title_color};
+                background: transparent;
+                font-size: 24px;
+                font-weight: 900;
+            }}
+            QLabel#judgeTimerLabel {{
+                color: {timer_color};
+                background: transparent;
+                font-size: 21px;
+                font-weight: 800;
+            }}
+            QTextBrowser {{
+                background: transparent;
+                border: 0;
+            }}
+            """)
         layout = QVBoxLayout(central)
+        layout.setContentsMargins(28, 18, 28, 22)
+        layout.setSpacing(14)
         header = QHBoxLayout()
-        header.addWidget(logo_label(48))
+        header.setSpacing(16)
+        header.addWidget(logo_label(56))
         header.addWidget(self.title_label)
+        header.addWidget(self.timer_label)
         header.addStretch(1)
         layout.addLayout(header)
         layout.addWidget(self.browser)
@@ -53,13 +88,19 @@ class JudgeDisplayWindow(QMainWindow):
         self.resize(1000, 700)
 
     def set_content(self, title: str, body: str) -> None:
-        self.title_label.setText(title)
+        self.set_title(title)
         self.browser.setHtml(
             build_html_document(body, image_width=88, font_size=23, judge=True)
         )
 
     def set_title(self, title: str) -> None:
-        self.title_label.setText(title)
+        base, _, timer = title.rpartition(" - ")
+        if base and timer:
+            self.title_label.setText(base)
+            self.timer_label.setText(f"◷  {timer}")
+        else:
+            self.title_label.setText(title)
+            self.timer_label.setText("")
 
     def move_to_screen(self, index: int) -> None:
         screens = QGuiApplication.screens()
@@ -113,6 +154,16 @@ class CompetitionControlWindow(QMainWindow):
 
     def build_ui(self) -> None:
         central = QWidget()
+        central.setObjectName("competitionRoot")
+        central.setStyleSheet("""
+            QWidget#competitionRoot {
+                background: transparent;
+            }
+            QTextBrowser {
+                background: transparent;
+                border: 0;
+            }
+            """)
         layout = QVBoxLayout(central)
         top = QHBoxLayout()
         self.title = QLabel(f"{self.counselor.id}")
@@ -123,8 +174,8 @@ class CompetitionControlWindow(QMainWindow):
         self.timer_label.setMinimumWidth(190)
         self.timer_label.setStyleSheet(
             "QLabel#competitionTimer {"
-            "font-size: 26px; font-weight: 800; color: #ffffff;"
-            "background: #b42318; border: 2px solid #7a271a;"
+            "font-size: 26px; font-weight: 800; color: #b42318;"
+            "background: transparent; border: 2px solid #7a271a;"
             "border-radius: 8px; padding: 10px 18px;"
             "}"
         )
@@ -187,6 +238,7 @@ class CompetitionControlWindow(QMainWindow):
 
         self.question_browser = QTextBrowser()
         self.question_browser.setOpenExternalLinks(False)
+        self.question_browser.setFrameShape(QFrame.NoFrame)
         layout.addWidget(self.question_browser)
         self.setCentralWidget(central)
         self.resize(1180, 760)
@@ -242,17 +294,13 @@ class CompetitionControlWindow(QMainWindow):
                     duration_seconds=int(self.settings["needle_duration_seconds"]),
                 )
                 number_by_id = self.student_number_map(round_data.students)
-                self.question_body_builder = (
-                    lambda students=round_data.students, numbers=number_by_id: self.render_question_screen(
-                        students, students, numbers
-                    )
+                self.question_body_builder = lambda students=round_data.students, numbers=number_by_id: self.render_question_screen(
+                    students, students, numbers
                 )
                 self.question_html = self.question_body_builder()
                 self.answer_html = self.render_round_answer_table(round_data.students)
-                self.judge_body_builder = (
-                    lambda columns, students=round_data.students, numbers=number_by_id: self.render_judge_comparison_table(
-                        students, numbers
-                    )
+                self.judge_body_builder = lambda columns, students=round_data.students, numbers=number_by_id: self.render_judge_comparison_table(
+                    students, numbers
                 )
                 self.judge_html = self.judge_body_builder(self.judge_columns())
             elif self.current_round == "鱼目混珠":
@@ -275,21 +323,17 @@ class CompetitionControlWindow(QMainWindow):
                 )
                 all_students = round_data.all_students
                 number_by_id = self.student_number_map(all_students)
-                self.question_body_builder = (
-                    lambda photo_students=all_students, info_students=round_data.own_students, numbers=number_by_id: self.render_question_screen(
-                        photo_students, info_students, numbers
-                    )
+                self.question_body_builder = lambda photo_students=all_students, info_students=round_data.own_students, numbers=number_by_id: self.render_question_screen(
+                    photo_students, info_students, numbers
                 )
                 self.question_html = self.question_body_builder()
                 self.answer_html = (
                     "<h2>本人学生标准信息</h2>"
                     + self.render_round_answer_table(round_data.own_students)
                 )
-                self.judge_body_builder = (
-                    lambda columns, students=round_data.own_students, numbers=number_by_id: (
-                        "<h2>本人学生标准信息</h2>"
-                        + self.render_judge_comparison_table(students, numbers)
-                    )
+                self.judge_body_builder = lambda columns, students=round_data.own_students, numbers=number_by_id: (
+                    "<h2>本人学生标准信息</h2>"
+                    + self.render_judge_comparison_table(students, numbers)
                 )
                 self.judge_html = self.judge_body_builder(self.judge_columns())
             else:
@@ -304,7 +348,9 @@ class CompetitionControlWindow(QMainWindow):
                     lambda: self.render_current_locate_question()
                 )
                 self.question_html = self.question_body_builder()
-                self.answer_html = self.render_locate_answer_table(self.locate_questions)
+                self.answer_html = self.render_locate_answer_table(
+                    self.locate_questions
+                )
                 self.judge_body_builder = (
                     lambda columns: self.render_current_locate_judge_card()
                 )
@@ -451,7 +497,9 @@ class CompetitionControlWindow(QMainWindow):
         viewport_width = max(640, self.question_browser.viewport().width())
         viewport_height = max(420, self.question_browser.viewport().height())
         available_width = max(420, viewport_width - 64)
-        available_height = max(260, viewport_height - (168 if self.info_visible else 126))
+        available_height = max(
+            260, viewport_height - (168 if self.info_visible else 126)
+        )
         best_width = 1
         best_columns = 1
         max_columns = min(count, 12)
@@ -479,7 +527,9 @@ class CompetitionControlWindow(QMainWindow):
             screen = screens[min(max(screen_index, 0), len(screens) - 1)]
             screen_width = screen.availableGeometry().width()
         if self.judge_window.isVisible():
-            screen_width = max(screen_width, self.judge_window.browser.viewport().width())
+            screen_width = max(
+                screen_width, self.judge_window.browser.viewport().width()
+            )
         return max(1, min(5, (screen_width - 56) // 390))
 
     def render_photo_cards(self, students: list[Student]) -> str:
@@ -553,7 +603,7 @@ class CompetitionControlWindow(QMainWindow):
             )
         frame_style = (
             f"width:{image_width}px;height:{image_height}px;"
-            "overflow:hidden;border-radius:6px;background:#e7eeee;"
+            "overflow:hidden;border-radius:6px;background:transparent;"
             f"text-align:center;line-height:{image_height}px;"
         )
         if student.photo_path and student.photo_path.exists():
@@ -569,7 +619,10 @@ class CompetitionControlWindow(QMainWindow):
         )
 
     def render_answers(
-        self, students: list[Student], judge: bool = False, columns: Optional[int] = None
+        self,
+        students: list[Student],
+        judge: bool = False,
+        columns: Optional[int] = None,
     ) -> str:
         columns = 3 if judge else (columns or self.answer_columns())
         image_width = 96 if judge else 96
@@ -608,27 +661,41 @@ class CompetitionControlWindow(QMainWindow):
     ) -> str:
         if not students:
             return "<p class='empty'>暂无标准信息。</p>"
-        fields = ["姓名", *[field for field in self.answer_fields if not is_name_field(field)]]
+        fields = [
+            "姓名",
+            *[field for field in self.answer_fields if not is_name_field(field)],
+        ]
         headers = ["字段"] + [
             f"编号 {number_by_id.get(id(student), index)}"
             for index, student in enumerate(students, start=1)
         ]
         rows = [
             "<table class='judge-comparison-table' width='100%' cellspacing='0' cellpadding='0'>",
+            f"<colgroup><col class='judge-field-col' width='{JUDGE_FIELD_COLUMN_WIDTH}' "
+            f"style='width:{JUDGE_FIELD_COLUMN_WIDTH}px;max-width:{JUDGE_FIELD_COLUMN_WIDTH}px;'>",
+            "".join("<col class='judge-student-col'>" for _ in students),
+            "</colgroup>",
             "<thead><tr>",
-            "".join(f"<th>{escape(header)}</th>" for header in headers),
+            f"<th class='judge-field-head' width='{JUDGE_FIELD_COLUMN_WIDTH}' "
+            f"style='width:{JUDGE_FIELD_COLUMN_WIDTH}px;max-width:{JUDGE_FIELD_COLUMN_WIDTH}px;'>字段</th>",
+            "".join(f"<th>{escape(header)}</th>" for header in headers[1:]),
             "</tr></thead><tbody>",
-            "<tr><td class='judge-field-cell'>照片</td>",
+            f"<tr><td class='judge-field-cell' width='{JUDGE_FIELD_COLUMN_WIDTH}' "
+            f"style='width:{JUDGE_FIELD_COLUMN_WIDTH}px;max-width:{JUDGE_FIELD_COLUMN_WIDTH}px;'>照片</td>",
         ]
         for student in students:
             rows.append(
                 "<td class='judge-student-photo-cell'>"
-                f"{self.image_tag(student, image_width=102)}"
+                f"{self.image_tag(student, image_width=122)}"
                 "</td>"
             )
         rows.append("</tr>")
         for field in fields:
-            rows.append(f"<tr><td class='judge-field-cell'>{escape(str(field))}</td>")
+            rows.append(
+                f"<tr><td class='judge-field-cell' width='{JUDGE_FIELD_COLUMN_WIDTH}' "
+                f"style='width:{JUDGE_FIELD_COLUMN_WIDTH}px;max-width:{JUDGE_FIELD_COLUMN_WIDTH}px;'>"
+                f"{escape(str(field))}</td>"
+            )
             for student in students:
                 rows.append(
                     "<td class='judge-value-cell'>"
@@ -686,7 +753,9 @@ class CompetitionControlWindow(QMainWindow):
             "</tr></thead><tbody>",
         ]
         for index, student in enumerate(students, start=1):
-            cells = [str(number_by_id.get(id(student), index) if number_by_id else index)]
+            cells = [
+                str(number_by_id.get(id(student), index) if number_by_id else index)
+            ]
             if include_answer_label:
                 cells.append(student.name)
             cells.extend(
@@ -797,7 +866,9 @@ class CompetitionControlWindow(QMainWindow):
         remainder = len(questions) % columns
         if remainder:
             for _ in range(columns - remainder):
-                cards.append("<td class='locate-judge-cell locate-judge-cell-empty'></td>")
+                cards.append(
+                    "<td class='locate-judge-cell locate-judge-cell-empty'></td>"
+                )
             cards.append("</tr>")
         cards.append("</table>")
         return "".join(cards)
@@ -825,9 +896,16 @@ def build_html_document(
         image_width = min(image_width, 96)
     answer_image_width = 96 if judge else max(84, min(96, image_width))
     answer_image_height = int(answer_image_width * PHOTO_HEIGHT_RATIO)
-    body_margin = 16 if judge else 26
+    body_margin = 8 if judge else 26
     answer_font_size = max(17, font_size - 1) if judge else max(18, font_size - 1)
     judge_class = "judge" if judge else "competition"
+    dark = theme.current_theme() == "dark"
+    text_color = "#eef2f7" if dark else "#172033"
+    heading_color = "#f8fafc" if dark else "#111827"
+    muted_color = "#c8d0da" if dark else "#667085"
+    border_color = "#3b4653" if dark else "#e9edf4"
+    table_border_color = "#3b4653" if dark else "#e1e6ec"
+    judge_tint = "rgba(124, 114, 255, 0.10)" if dark else "rgba(99, 91, 255, 0.045)"
     return f"""
     <html class="{judge_class}">
     <head>
@@ -835,15 +913,15 @@ def build_html_document(
     body {{
         font-family: 'Microsoft YaHei', 'PingFang SC', sans-serif;
         font-size: {font_size}px;
-        line-height: 1.62;
+        line-height: 1.5;
         margin: {body_margin}px;
-        color: #24383b;
-        background: #f1f6f4;
+        color: {text_color};
+        background: transparent;
     }}
     h2 {{
         margin: 0 0 12px 0;
         font-size: {font_size + 3}px;
-        color: #152d31;
+        color: {heading_color};
     }}
     .photo-table {{
         margin: 6px 0 0 0;
@@ -907,15 +985,15 @@ def build_html_document(
     }}
 
     body.judge {{
-        line-height: 1.52;
-        background: #f6f7f8;
+        line-height: 1.28;
+        background: transparent;
     }}
 
     .judge .answer-board, body.judge .answer-board {{
-        margin-top: 16px;
+        margin-top: 8px;
         table-layout: fixed;
         border-collapse: separate;
-        border-spacing: 18px 16px;
+        border-spacing: 8px 8px;
     }}
     .judge .answer-cell, body.judge .answer-cell {{
         vertical-align: top;
@@ -924,25 +1002,25 @@ def build_html_document(
     .judge .answer-card, body.judge .answer-card {{
         width: 100%;
         background: #ffffff;
-        border: 1px solid #d9dee3;
-        border-radius: 14px;
-        box-shadow: 0 8px 22px rgba(15, 23, 42, 0.06);
+        border: 1px solid #e2e6ec;
+        border-radius: 8px;
+        box-shadow: none;
         overflow: hidden;
     }}
     .judge .answer-photo, body.judge .answer-photo {{
         width: auto;
-        padding: 16px 16px 10px 16px;
+        padding: 8px 10px 5px 10px;
         text-align: center;
-        background: #fafafa;
-        border-bottom: 1px solid #e2e5e8;
+        background: #f8fafc;
+        border-bottom: 1px solid #eef1f5;
     }}
     .judge .answer-content, body.judge .answer-content {{
-        padding: 14px 16px 16px 16px;
+        padding: 8px 10px 10px 10px;
     }}
     .judge .answer-content h2, body.judge .answer-content h2 {{
         display: block;
-        padding: 0 0 10px 0;
-        margin: 0 0 12px 0;
+        padding: 0 0 6px 0;
+        margin: 0 0 6px 0;
         border-radius: 6px;
         background: transparent;
         color: #1f2933;
@@ -968,64 +1046,93 @@ def build_html_document(
         white-space: pre-wrap;
         font-family: 'Microsoft YaHei', 'PingFang SC', sans-serif;
         font-size: {answer_font_size + 1}px;
-        line-height: 1.72;
+        line-height: 1.42;
         margin: 0;
         color: #27313a;
         background: #ffffff;
-        border: 1px solid #d9dee3;
+        border: 1px solid #e2e6ec;
         border-radius: 6px;
-        padding: 14px 16px;
+        padding: 8px 10px;
         font-weight: 600;
     }}
     .judge-comparison-table {{
-        margin-top: 14px;
+        margin-top: 10px;
         table-layout: fixed;
-        border-collapse: collapse;
-        background: #ffffff;
-        border: 1px solid #d7dde2;
-        box-shadow: 0 8px 22px rgba(15, 23, 42, 0.06);
+        border-collapse: separate;
+        border-spacing: 0;
+        background: transparent;
+        border: 1px solid {table_border_color};
+        border-radius: 12px;
+        overflow: hidden;
+        box-shadow: 0 8px 20px rgba(15, 23, 42, 0.06);
+    }}
+    .judge-field-col {{
+        width: {JUDGE_FIELD_COLUMN_WIDTH}px;
+        max-width: {JUDGE_FIELD_COLUMN_WIDTH}px;
+    }}
+    .judge-student-col {{
+        width: auto;
     }}
     .judge-comparison-table th {{
-        padding: 14px 16px;
-        border: 1px solid #d7dde2;
-        background: #f1f4f7;
-        color: #1f2937;
+        padding: 13px 16px;
+        border: 0;
+        border-right: 1px solid {border_color};
+        border-bottom: 1px solid {border_color};
+        background: {judge_tint};
+        color: {heading_color};
         font-size: {font_size + 1}px;
         font-weight: 900;
         text-align: center;
         word-break: break-word;
     }}
-    .judge-comparison-table th:first-child {{
-        width: 128px;
+    .judge-comparison-table th:last-child {{
+        border-right: 0;
+    }}
+    .judge-comparison-table th:first-child, .judge-field-head {{
+        width: {JUDGE_FIELD_COLUMN_WIDTH}px;
+        max-width: {JUDGE_FIELD_COLUMN_WIDTH}px;
         text-align: left;
+        color: {muted_color};
     }}
     .judge-comparison-table td {{
-        padding: 14px 16px;
-        border: 1px solid #dce2e7;
-        color: #25313b;
-        background: #ffffff;
+        padding: 9px 16px;
+        border: 0;
+        border-right: 1px solid {border_color};
+        border-bottom: 1px solid {border_color};
+        color: {text_color};
+        background: transparent;
         font-size: {font_size}px;
-        line-height: 1.48;
-        vertical-align: top;
+        line-height: 1.22;
+        vertical-align: middle;
         word-break: break-word;
         white-space: normal;
     }}
+    .judge-comparison-table td:last-child {{
+        border-right: 0;
+    }}
+    .judge-comparison-table tbody tr:last-child td {{
+        border-bottom: 0;
+    }}
     .judge-comparison-table tbody tr:nth-child(even) td {{
-        background: #f8fafb;
+        background: transparent;
     }}
     .judge-field-cell {{
-        width: 128px;
-        color: #5c6a78;
-        font-weight: 800;
-        white-space: nowrap;
+        width: {JUDGE_FIELD_COLUMN_WIDTH}px;
+        max-width: {JUDGE_FIELD_COLUMN_WIDTH}px;
+        color: {heading_color};
+        background: {judge_tint};
+        font-weight: 900;
+        white-space: normal;
     }}
     .judge-value-cell {{
-        font-weight: 650;
+        font-weight: 800;
     }}
     .judge-student-photo-cell {{
         text-align: center;
         vertical-align: middle;
-        background: #fbfcfd;
+        background: transparent;
+        padding-top: 16px;
+        padding-bottom: 16px;
     }}
     .judge-student-photo-cell .photo-img, .judge-student-photo-cell img {{
         border-radius: 10px;
@@ -1058,31 +1165,31 @@ def build_html_document(
         vertical-align: top;
     }}
     .judge .answer-info-key, body.judge .answer-info-key {{
-        width: 146px;
-        padding: 12px 10px 12px 16px;
-        border-color: #d8dde2;
-        background: #f6f8fa;
+        width: 124px;
+        padding: 6px 8px 6px 10px;
+        border-color: #e2e6ec;
+        background: #f8fafc;
     }}
     .judge .answer-info-value, body.judge .answer-info-value {{
-        padding: 12px 16px 12px 14px;
-        border-color: #d8dde2;
+        padding: 6px 10px 6px 8px;
+        border-color: #e2e6ec;
         background: #ffffff;
     }}
     .answer-index {{
         display: block;
-        background: #eef0f2;
+        background: #f7f8fa;
         color: #2f3a44;
         font-size: {font_size}px;
         font-weight: 800;
-        padding: 10px 14px;
+        padding: 6px 10px;
         text-align: left;
-        border-bottom: 1px solid #d8dde2;
+        border-bottom: 1px solid #e2e6ec;
     }}
     .judge-page-title {{
-        margin: 0 0 12px 0;
-        padding: 0 0 12px 0;
+        margin: 0 0 6px 0;
+        padding: 0 0 8px 0;
         color: #1f2937;
-        border-bottom: 1px solid #d9dee3;
+        border-bottom: 1px solid #e2e6ec;
         font-size: {font_size + 6}px;
         font-weight: 900;
     }}
@@ -1095,15 +1202,15 @@ def build_html_document(
     }}
     .locate-judge-card {{
         background: #ffffff;
-        border: 1px solid #d9dee3;
-        border-radius: 14px;
-        box-shadow: 0 8px 22px rgba(15, 23, 42, 0.06);
+        border: 1px solid #e2e6ec;
+        border-radius: 8px;
+        box-shadow: none;
     }}
     .locate-card-head {{
-        padding: 16px 18px 14px 18px;
+        padding: 9px 12px 8px 12px;
         background: #ffffff;
-        border-bottom: 1px solid #edf0f2;
-        border-radius: 14px 14px 0 0;
+        border-bottom: 1px solid #eef1f5;
+        border-radius: 8px 8px 0 0;
         white-space: nowrap;
     }}
     .locate-card-index {{
@@ -1124,11 +1231,11 @@ def build_html_document(
         line-height: 1.2;
     }}
     .locate-detail-card {{
-        margin-top: 24px;
+        margin-top: 10px;
         background: #ffffff;
-        border: 1px solid #d9dee3;
-        border-radius: 16px;
-        box-shadow: 0 10px 26px rgba(15, 23, 42, 0.07);
+        border: 1px solid #e2e6ec;
+        border-radius: 8px;
+        box-shadow: none;
     }}
     .locate-detail-photo {{
         width: 360px;
@@ -1329,22 +1436,23 @@ def build_html_document(
         background: #f7f8f8;
     }}
     .judge .student-answer-table, body.judge .student-answer-table {{
-        border: 1px solid #c6cdd0;
+        border: 1px solid #e1e6ec;
         box-shadow: none;
     }}
     .judge .student-answer-table th, body.judge .student-answer-table th {{
-        background: #edf0f0;
+        background: #f7f8fa;
         color: #263b3f;
-        border: 1px solid #c6cdd0;
+        border: 1px solid #e1e6ec;
         font-size: {font_size}px;
-        padding: 13px 14px;
+        padding: 7px 10px;
     }}
     .judge .student-answer-table td, body.judge .student-answer-table td {{
-        border: 1px solid #d2d8da;
+        border: 1px solid #e4e8ee;
         font-size: {font_size - 1}px;
         font-weight: 600;
-        padding: 13px 14px;
+        padding: 6px 10px;
         background: #ffffff;
+        line-height: 1.25;
     }}
     .judge .student-answer-table tbody tr:nth-child(even) td, body.judge .student-answer-table tbody tr:nth-child(even) td {{
         background: #f7f8f8;
@@ -1381,6 +1489,21 @@ def build_html_document(
         color: #607d8b;
         padding: 32px;
         text-align: center;
+    }}
+    body, table, thead, tbody, tr, th, td, div, pre, h2, span, img {{
+        background: transparent;
+    }}
+    body.judge, body.judge td, body.judge pre, body.judge dd {{
+        color: {text_color};
+    }}
+    body.judge th, body.judge h2, body.judge .judge-page-title,
+    body.judge .answer-index, body.judge .locate-card-name,
+    body.judge .locate-detail-name {{
+        color: {heading_color};
+    }}
+    body.judge .judge-comparison-table th:first-child,
+    body.judge dt, body.judge .answer-info-key {{
+        color: {muted_color};
     }}
     </style>
     </head>

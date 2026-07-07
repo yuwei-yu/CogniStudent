@@ -6,7 +6,16 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QLabel
 
-LOGO_PATH = Path(__file__).resolve().parents[2] / "resources" / "xut_logo.png"
+from utils.helpers import bundled_root, resources_root
+
+LOGO_NAME = "xut_logo.png"
+
+
+def logo_path() -> Path:
+    visible_path = resources_root() / LOGO_NAME
+    if visible_path.exists():
+        return visible_path
+    return bundled_root() / "resources" / LOGO_NAME
 
 
 class LogoLabel(QLabel):
@@ -19,7 +28,13 @@ class LogoLabel(QLabel):
         self.render_logo()
 
     def render_logo(self) -> None:
-        pixmap = QPixmap(str(LOGO_PATH))
+        pixmap = QPixmap(str(logo_path()))
+        if pixmap.isNull():
+            self.setText("XUT")
+            self.setStyleSheet(
+                "font-size: 14px; font-weight: 700; border: 1px solid #d7dde2; border-radius: 6px;"
+            )
+            return
         self.setPixmap(
             pixmap.scaled(
                 self.logo_size,

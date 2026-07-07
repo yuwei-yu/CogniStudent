@@ -116,7 +116,8 @@ resources/
 ```powershell
 pyinstaller --onefile --windowed --name "CogniStudent" `
   --paths src `
-  --add-data "src/resources/template.zip;resources/template.zip" `
+  --add-data "src/resources/template.zip;resources" `
+  --add-data "resources/xut_logo.png;resources" `
   --collect-all qt_material `
   src/main.py
 ```

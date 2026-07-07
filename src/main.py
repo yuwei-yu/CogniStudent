@@ -25,9 +25,14 @@ class AppController:
             if self.window is None:
                 QApplication.instance().quit()
             return
-        if QMessageBox.question(None, "导入历史数据", "是否先导入历史数据 zip？") == QMessageBox.Yes:
+        if (
+            QMessageBox.question(None, "导入历史数据", "是否先导入历史数据 zip？")
+            == QMessageBox.Yes
+        ):
             self.import_data_package("导入历史数据")
-        self.window = AdminWindow(logout_callback=self.logout, theme_callback=self.toggle_theme)
+        self.window = AdminWindow(
+            logout_callback=self.logout, theme_callback=self.toggle_theme
+        )
         self.window.show()
 
     def import_data_package(self, title: str) -> bool:

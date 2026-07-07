@@ -67,35 +67,42 @@ def current_theme_label() -> str:
 def common_qss(theme: str) -> str:
     if theme == "light":
         panel = "#ffffff"
-        border = "#d7e1df"
-        table = "#f8fbfa"
-        text = "#1f2d2f"
-        muted_text = "#31484c"
-        button_text = "#123236"
-        button_bg = "#f5faf9"
-        button_border = "#6f9fa3"
-        button_hover = "#e6f2f1"
-        button_pressed = "#d2e6e4"
-        disabled_text = "#8a9a9d"
+        page = "#f6f8fb"
+        border = "#e5e8ee"
+        table = "#ffffff"
+        header = "#f7f8fa"
+        text = "#202833"
+        muted_text = "#5b6573"
+        button_text = "#1f3f68"
+        button_bg = "#ffffff"
+        button_border = "#d8dde6"
+        button_hover = "#f0f5ff"
+        button_pressed = "#e4ecfb"
+        disabled_text = "#9aa3af"
+        selection = "#2f6fed"
     else:
-        panel = "#263238"
-        border = "#455a64"
-        table = "#1f2a30"
-        text = "#eef6f5"
-        muted_text = "#d9eeee"
-        button_text = "#eef6f5"
-        button_bg = "#2f3f46"
-        button_border = "#607d8b"
-        button_hover = "#38515a"
-        button_pressed = "#263940"
-        disabled_text = "#8ea1a7"
+        panel = "#20262e"
+        page = "#161b22"
+        border = "#323b46"
+        table = "#1b222a"
+        header = "#232b35"
+        text = "#eef2f7"
+        muted_text = "#c8d0da"
+        button_text = "#eef2f7"
+        button_bg = "#242c36"
+        button_border = "#3b4653"
+        button_hover = "#2d3947"
+        button_pressed = "#1f2731"
+        disabled_text = "#8792a0"
+        selection = "#2f6fed"
     return f"""
     QWidget {{
         color: {text};
+        background: {page};
     }}
     #titleLabel {{
         font-size: 20px;
-        font-weight: 600;
+        font-weight: 700;
         color: {muted_text};
     }}
     QLabel, QCheckBox, QRadioButton {{
@@ -103,9 +110,9 @@ def common_qss(theme: str) -> str:
     }}
     QGroupBox {{
         border: 1px solid {border};
-        border-radius: 6px;
-        margin-top: 12px;
-        padding: 10px;
+        border-radius: 8px;
+        margin-top: 14px;
+        padding: 12px;
         background: {panel};
         color: {text};
     }}
@@ -119,24 +126,37 @@ def common_qss(theme: str) -> str:
     QTableWidget {{
         gridline-color: {border};
         background: {table};
-        alternate-background-color: {panel};
+        alternate-background-color: {header};
         color: {text};
+        border: 1px solid {border};
+        border-radius: 8px;
+        selection-background-color: {selection};
         selection-color: #ffffff;
     }}
     QHeaderView::section {{
         color: {text};
+        background: {header};
+        border: 0;
+        border-right: 1px solid {border};
+        border-bottom: 1px solid {border};
+        padding: 7px 8px;
+        font-weight: 700;
     }}
     QLineEdit, QTextEdit, QComboBox, QSpinBox, QListWidget {{
         color: {text};
         background: {panel};
+        border: 1px solid {border};
+        border-radius: 6px;
+        padding: 5px 8px;
     }}
     QPushButton {{
-        min-height: 28px;
-        border-radius: 4px;
+        min-height: 30px;
+        border-radius: 6px;
         color: {button_text};
         background: {button_bg};
         border: 1px solid {button_border};
-        padding: 4px 10px;
+        padding: 5px 12px;
+        font-weight: 600;
     }}
     QPushButton:hover {{
         background: {button_hover};
